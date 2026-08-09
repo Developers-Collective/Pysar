@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>PYSAR - 1.0.0</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<base href="./" />
+<style>
+  html, body, #root { height: 100%; margin: 0; background: #0e1013; }
+</style>
+
+<script>
+  window.PYSAR_NATIVE_CHROME = true;
+  window.PYSAR_APP = { name: "PYSAR - 1.0.0", version: "1.0.0", displayVersion: "1.0.0", phase: "Stable" };
+  window.PYSAR_DATA = { archive: null, sounds: [], banks: [], groups: [], players: [], waveArchives: [], files: [] };
+
+  window.pysar = {
+    ready: new Promise((resolve) => {
+      window.addEventListener("pywebviewready", () => resolve(window.pywebview.api));
+    }),
+    async call(method, ...args) {
+      const api = await window.pysar.ready;
+      if (typeof api[method] !== "function") {
+        throw new Error("PYSAR API has no method: " + method);
+      }
+      return api[method](...args);
+    },
+    on(eventType, handler) {
+      window.addEventListener("pysar-event", (e) => {
+        if (e.detail && e.detail.type === eventType) handler(e.detail.payload);
+      });
+    },
+  };
+</script>
+
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body data-theme="dark" data-density="compact">
+<div id="root"></div>
+
+<script src="vendor/react.development.js"></script>
+<script src="vendor/react-dom.development.js"></script>
+<script src="vendor/babel.min.js"></script>
+
+<script type="text/babel" src="primitives.jsx"></script>
+<script type="text/babel" src="sidebar.jsx"></script>
+<script type="text/babel" src="screens-sounds.jsx"></script>
+<script type="text/babel" src="tabs/tab-base.jsx"></script>
+<script type="text/babel" src="tabs/bank-tab.jsx"></script>
+<script type="text/babel" src="tabs/bank-detail.jsx"></script>
+<script type="text/babel" src="tabs/group-tab.jsx"></script>
+<script type="text/babel" src="tabs/player-tab.jsx"></script>
+<script type="text/babel" src="tabs/arc-tab.jsx"></script>
+<script type="text/babel" src="tabs/arc-detail.jsx"></script>
+<script type="text/babel" src="tabs/file-tab.jsx"></script>
+<script type="text/babel" src="screens-extra.jsx"></script>
+<script type="text/babel" src="keyboard.jsx"></script>
+<script type="text/babel" src="media-player-bar.jsx"></script>
+<script type="text/babel" src="inspector/properties.jsx"></script>
+<script type="text/babel" src="inspector/references.jsx"></script>
+<script type="text/babel" src="inspector/inspector.jsx"></script>
+<script type="text/babel" src="dialogs.jsx"></script>
+<script type="text/babel" src="screens/welcome-screen.jsx"></script>
+<script type="text/babel" src="audio-clock.jsx"></script>
+<script type="text/babel" src="app.jsx"></script>
+</body>
+</html>

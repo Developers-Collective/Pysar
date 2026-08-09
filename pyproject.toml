@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pysar"
+version = "1.0.0"
+description = "The first fully-fledged Nintendo Wii BRSAR editor"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+authors = [
+    { name = "Ogu99" },
+    { name = "Nin0" },
+]
+keywords = ["audio", "brsar", "nw4r", "wii", "sound-archive"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: MacOS X",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "numba>=0.62,<0.63; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "numba>=0.59; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "numpy>=1.26",
+    "pypresence>=4.6,<5",
+    "pywebview>=5.0; sys_platform != 'linux'",
+    "pywebview[gtk]>=5.0; sys_platform == 'linux'",
+    "sounddevice>=0.4",
+]
+
+[project.optional-dependencies]
+build = [
+    "PyInstaller>=6.10",
+]
+
+[project.scripts]
+pysar = "pysar.app:main"
+
+[tool.setuptools.packages.find]
+include = ["pysar*"]
+exclude = ["__old*"]
+
+[tool.setuptools.package-data]
+"pysar.gui" = ["*.html", "*.css", "*.jsx", "icons/*.png", "icons/*.svg", "icons/*.gif", "icons/*.webp", "vendor/*.js"]
+"pysar.gui.logo" = ["*.png", "*.ico"]
