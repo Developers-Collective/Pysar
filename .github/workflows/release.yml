@@ -1,0 +1,175 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  build-windows:
+    name: Build Windows x64
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          architecture: x64
+          cache: pip
+
+      - name: Check tag and package version
+        shell: python
+        run: |
+          import os
+          import pysar
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          expected = f"v{pysar.__version__}"
+          if tag != expected:
+              raise SystemExit(f"Release tag {tag!r} does not match package version {expected!r}")
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[build]"
+
+      - name: Build Pysar
+        run: >-
+          pyinstaller
+          --noconfirm
+          --clean
+          --windowed
+          --onedir
+          --name Pysar
+          --icon resources/logo/pysar.ico
+          --add-data "pysar/gui;pysar/gui"
+          --add-data "resources;resources"
+          pysar.py
+
+      - name: Check Windows bundle
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/Pysar/Pysar.exe")) {
+            throw "PyInstaller did not create dist/Pysar/Pysar.exe"
+          }
+
+      - name: Package Windows bundle
+        shell: pwsh
+        run: |
+          $archive = "Pysar-${{ github.ref_name }}-Windows-x64.zip"
+          Compress-Archive -Path "dist/Pysar" -DestinationPath $archive
+
+      - name: Upload Windows bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows
+          path: Pysar-*-Windows-x64.zip
+          if-no-files-found: error
+
+  build-linux:
+    name: Build Linux x64
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install GTK build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            build-essential \
+            libcairo2-dev \
+            libgirepository1.0-dev \
+            pkg-config \
+            gir1.2-gtk-3.0 \
+            gir1.2-webkit2-4.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          architecture: x64
+          cache: pip
+
+      - name: Check tag and package version
+        shell: python
+        run: |
+          import os
+          import pysar
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          expected = f"v{pysar.__version__}"
+          if tag != expected:
+              raise SystemExit(f"Release tag {tag!r} does not match package version {expected!r}")
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[build]"
+
+      - name: Build Pysar
+        run: >-
+          pyinstaller
+          --noconfirm
+          --clean
+          --windowed
+          --onedir
+          --name Pysar
+          --add-data "pysar/gui:pysar/gui"
+          --add-data "resources:resources"
+          pysar.py
+
+      - name: Check Linux bundle
+        run: test -x dist/Pysar/Pysar
+
+      - name: Package Linux bundle
+        run: tar -C dist -czf "Pysar-${{ github.ref_name }}-Linux-x64.tar.gz" Pysar
+
+      - name: Upload Linux bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-linux
+          path: Pysar-*-Linux-x64.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs:
+      - build-windows
+      - build-linux
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release bundles
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create checksums
+        working-directory: release-assets
+        run: sha256sum Pysar-* > SHA256SUMS.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/Pysar-*.zip
+            release-assets/Pysar-*.tar.gz
+            release-assets/SHA256SUMS.txt
