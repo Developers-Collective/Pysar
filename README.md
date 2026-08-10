@@ -124,4 +124,4 @@ Pysar (c) 2026 made by
 [Ogu99](https://github.com/Ogu-99) and
 [Nin0](https://github.com/N-I-N-0)
 
-Huge thanks to RedStoneMatt for providing additional technical and mental (xD) help.
+Huge thanks to [RedStoneMatt](https://github.com/RedStoneMatt) for providing additional technical and mental (xD) help.
