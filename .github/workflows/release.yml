@@ -2,8 +2,8 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       tag:
@@ -16,7 +16,7 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  BUILD_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
 
 jobs:
   build-windows:
@@ -34,7 +34,8 @@ jobs:
           architecture: x64
           cache: pip
 
-      - name: Check tag and package version
+      - name: Check release tag and package version
+        if: github.event_name == 'workflow_dispatch'
         shell: python
         run: |
           import os
@@ -43,7 +44,7 @@ jobs:
           sys.path.insert(0, os.environ["GITHUB_WORKSPACE"])
           import pysar
 
-          tag = os.environ["RELEASE_TAG"]
+          tag = os.environ["BUILD_LABEL"]
           expected = f"v{pysar.__version__}"
           if tag != expected:
               raise SystemExit(f"Release tag {tag!r} does not match package version {expected!r}")
@@ -76,8 +77,8 @@ jobs:
       - name: Package Windows executable
         shell: pwsh
         run: |
-          $executable = "Pysar-${{ env.RELEASE_TAG }}-Windows-x64.exe"
-          $archive = "Pysar-${{ env.RELEASE_TAG }}-Windows-x64.zip"
+          $executable = "Pysar-${{ env.BUILD_LABEL }}-Windows-x64.exe"
+          $archive = "Pysar-${{ env.BUILD_LABEL }}-Windows-x64.zip"
           Move-Item "dist/Pysar.exe" $executable
           Compress-Archive -Path $executable -DestinationPath $archive
 
@@ -114,7 +115,8 @@ jobs:
           architecture: x64
           cache: pip
 
-      - name: Check tag and package version
+      - name: Check release tag and package version
+        if: github.event_name == 'workflow_dispatch'
         shell: python
         run: |
           import os
@@ -123,7 +125,7 @@ jobs:
           sys.path.insert(0, os.environ["GITHUB_WORKSPACE"])
           import pysar
 
-          tag = os.environ["RELEASE_TAG"]
+          tag = os.environ["BUILD_LABEL"]
           expected = f"v{pysar.__version__}"
           if tag != expected:
               raise SystemExit(f"Release tag {tag!r} does not match package version {expected!r}")
@@ -149,7 +151,7 @@ jobs:
         run: test -x dist/Pysar
 
       - name: Package Linux bundle
-        run: tar -C dist -czf "Pysar-${{ env.RELEASE_TAG }}-Linux-x64.tar.gz" Pysar
+        run: tar -C dist -czf "Pysar-${{ env.BUILD_LABEL }}-Linux-x64.tar.gz" Pysar
 
       - name: Upload Linux bundle
         uses: actions/upload-artifact@v7
@@ -159,6 +161,7 @@ jobs:
           if-no-files-found: error
 
   publish:
+    if: github.event_name == 'workflow_dispatch'
     name: Publish GitHub release
     needs:
       - build-windows
@@ -182,7 +185,7 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
+          tag_name: ${{ env.BUILD_LABEL }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           fail_on_unmatched_files: true
