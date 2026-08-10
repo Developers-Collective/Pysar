@@ -59,7 +59,7 @@ jobs:
           --noconfirm
           --clean
           --windowed
-          --onedir
+          --onefile
           --name Pysar
           --icon resources/logo/pysar.ico
           --add-data "pysar/gui;pysar/gui"
@@ -69,17 +69,19 @@ jobs:
       - name: Check Windows bundle
         shell: pwsh
         run: |
-          if (-not (Test-Path "dist/Pysar/Pysar.exe")) {
-            throw "PyInstaller did not create dist/Pysar/Pysar.exe"
+          if (-not (Test-Path "dist/Pysar.exe")) {
+            throw "PyInstaller did not create dist/Pysar.exe"
           }
 
-      - name: Package Windows bundle
+      - name: Package Windows executable
         shell: pwsh
         run: |
+          $executable = "Pysar-${{ env.RELEASE_TAG }}-Windows-x64.exe"
           $archive = "Pysar-${{ env.RELEASE_TAG }}-Windows-x64.zip"
-          Compress-Archive -Path "dist/Pysar" -DestinationPath $archive
+          Move-Item "dist/Pysar.exe" $executable
+          Compress-Archive -Path $executable -DestinationPath $archive
 
-      - name: Upload Windows bundle
+      - name: Upload Windows archive
         uses: actions/upload-artifact@v7
         with:
           name: release-windows
@@ -137,14 +139,14 @@ jobs:
           --noconfirm
           --clean
           --windowed
-          --onedir
+          --onefile
           --name Pysar
           --add-data "pysar/gui:pysar/gui"
           --add-data "resources:resources"
           pysar.py
 
       - name: Check Linux bundle
-        run: test -x dist/Pysar/Pysar
+        run: test -x dist/Pysar
 
       - name: Package Linux bundle
         run: tar -C dist -czf "Pysar-${{ env.RELEASE_TAG }}-Linux-x64.tar.gz" Pysar
@@ -187,5 +189,4 @@ jobs:
           files: |
             release-assets/Pysar-*.zip
             release-assets/Pysar-*.tar.gz
-            release-assets/SHA256SUMS.txt
             release-assets/SHA256SUMS.txt
