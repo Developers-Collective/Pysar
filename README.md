@@ -100,7 +100,7 @@ After installation, the `pysar` command starts the same application. Set `PYSAR_
 
 ## Making a release
 
-The release workflow runs when a version tag is pushed. Before tagging, update the version in both `pyproject.toml` and `pysar/__init__.py`, then create a matching tag:
+The release workflow runs when a version tag is pushed. Before tagging, update the version in both `pyproject.toml` and `pysar/__init__.py`, then create a matching (non-existent) tag:
 
 ```bash
 git tag v1.0.1
