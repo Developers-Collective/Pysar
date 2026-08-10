@@ -11,13 +11,12 @@
 Pysar is the first fully fledged editor for Nintendo Wii BRSAR archives! It gives streams, wave sounds, sequences, banks, players, groups, and wave archives a proper desktop interface, with playback and editing tools in the same place.
 
 Version 1.0 is the first stable release. But please be aware that it may still contain many annoying bugs. If you find a bug or have a question, please reach out to us on Discord:
-`ogu_99` or `nin0_`.
+`@ogu_99` or `@nin0_`.
 
 This is an independent project and is not affiliated with or endorsed by Nintendo.
 
 ## What it can do
 
----
 - Browse and search sounds, banks, groups, players, wave archives, and embedded files.
 - Preview streams, wave sounds, individual samples, sequence variations, and bank notes.
 - Import, replace, rename, reorganize, and remove archive resources.
@@ -27,8 +26,6 @@ This is an independent project and is not affiliated with or endorsed by Nintend
 - Use safe mode while exploring, then explicitly enable archive-changing operations when you are ready.
 
 ## Downloading Pysar
-
----
 
 Ready-to-run builds are published on the [Releases page](https://github.com/Developers-Collective/Pysar/releases/latest) for 64-bit Windows and Linux.
 
@@ -60,8 +57,6 @@ If your desktop or archive tool removed the executable bit, restore it with `chm
 There is no packaged macOS build at the moment. Pysar can still be run from source on macOS using the instructions below.
 
 ## Running from source
-
----
 
 You will need Git and Python 3.11, 3.12, or 3.13. Python 3.12 is what the release builds use.
 
@@ -105,8 +100,6 @@ After installation, the `pysar` command starts the same application. Set `PYSAR_
 
 ## Making a release
 
----
-
 The release workflow runs when a version tag is pushed. Before tagging, update the version in both `pyproject.toml` and `pysar/__init__.py`, then create a matching tag:
 
 ```bash
@@ -117,8 +110,6 @@ git push origin v1.0.1
 GitHub Actions checks that the tag matches Pysar's version, builds Windows and Linux bundles on their native runners, creates the GitHub release, and attaches both archives plus `SHA256SUMS.txt`. Release notes are generated from the commits and pull requests since the previous tag.
 
 ## Credits
-
----
 
 Pysar (c) 2026 made by
 [Ogu99](https://github.com/Ogu-99) and
