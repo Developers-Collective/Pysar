@@ -4,12 +4,19 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (for example: v1.0.0)"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 env:
   PYTHON_VERSION: "3.12"
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
   build-windows:
@@ -36,7 +43,7 @@ jobs:
           sys.path.insert(0, os.environ["GITHUB_WORKSPACE"])
           import pysar
 
-          tag = os.environ["GITHUB_REF_NAME"]
+          tag = os.environ["RELEASE_TAG"]
           expected = f"v{pysar.__version__}"
           if tag != expected:
               raise SystemExit(f"Release tag {tag!r} does not match package version {expected!r}")
@@ -69,7 +76,7 @@ jobs:
       - name: Package Windows bundle
         shell: pwsh
         run: |
-          $archive = "Pysar-${{ github.ref_name }}-Windows-x64.zip"
+          $archive = "Pysar-${{ env.RELEASE_TAG }}-Windows-x64.zip"
           Compress-Archive -Path "dist/Pysar" -DestinationPath $archive
 
       - name: Upload Windows bundle
@@ -114,7 +121,7 @@ jobs:
           sys.path.insert(0, os.environ["GITHUB_WORKSPACE"])
           import pysar
 
-          tag = os.environ["GITHUB_REF_NAME"]
+          tag = os.environ["RELEASE_TAG"]
           expected = f"v{pysar.__version__}"
           if tag != expected:
               raise SystemExit(f"Release tag {tag!r} does not match package version {expected!r}")
@@ -140,7 +147,7 @@ jobs:
         run: test -x dist/Pysar/Pysar
 
       - name: Package Linux bundle
-        run: tar -C dist -czf "Pysar-${{ github.ref_name }}-Linux-x64.tar.gz" Pysar
+        run: tar -C dist -czf "Pysar-${{ env.RELEASE_TAG }}-Linux-x64.tar.gz" Pysar
 
       - name: Upload Linux bundle
         uses: actions/upload-artifact@v7
@@ -173,9 +180,12 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
             release-assets/Pysar-*.zip
             release-assets/Pysar-*.tar.gz
+            release-assets/SHA256SUMS.txt
             release-assets/SHA256SUMS.txt
