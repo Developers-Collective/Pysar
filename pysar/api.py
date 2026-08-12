@@ -2157,6 +2157,7 @@ class PysarApi:
         # Pre-compile the numba render kernel so the first playback is instant.
         try:
             from pysar.seq.renderer import (
+                _AX_SRC_COEFFICIENTS_NB,
                 _render_voice_loop,
                 _NOTE_TABLE_NB,
                 _PITCH_TABLE_NB,
@@ -2178,7 +2179,7 @@ class PysarApi:
                 0.0, False,
                 0.0, 0.0, 0.0, 0.0, 0.0, False,
                 False, 0, 4,
-                -1.325,
+                _AX_SRC_COEFFICIENTS_NB,
                 _NOTE_TABLE_NB, _PITCH_TABLE_NB, _LFO_SIN_TABLE_NB,
             )
         except Exception:

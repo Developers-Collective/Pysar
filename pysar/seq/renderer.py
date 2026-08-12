@@ -38,6 +38,27 @@ _LFO_SIN_TABLE_NB = np.array([
     90, 94, 98, 102, 106, 109, 112, 115, 117, 120, 122, 123, 125, 126, 126, 127, 127,
 ], dtype=np.int32)
 
+
+def _build_ax_src_coefficients() -> np.ndarray:
+    x = np.linspace(-2.0, 2.0, 512, endpoint=True)
+    filters = (
+        np.sinc(x * 0.5) * np.hamming(512),
+        np.sinc(x * 0.75) * np.kaiser(512, np.pi * 9.0 / 4.0),
+        np.sinc(x) * np.hamming(512),
+    )
+    tables = np.empty((3, 128, 4), dtype=np.float64)
+    for filter_index, coefficients in enumerate(filters):
+        phases = np.column_stack(tuple(
+            coefficients[start:start + 128][::-1]
+            for start in range(0, 512, 128)
+        ))
+        scale = max(float(np.sum(phase)) for phase in phases)
+        tables[filter_index] = np.rint(phases / scale * 32767.0) / 32768.0
+    return tables
+
+
+_AX_SRC_COEFFICIENTS_NB = _build_ax_src_coefficients()
+
 # Envelope status as integers for numba
 _ENV_ST_ATTACK = 0
 _ENV_ST_HOLD = 1
@@ -204,24 +225,89 @@ def _pan_ratio_nb(pan, curve):
 
 
 @nb.njit(cache=True, nogil=True)
-def _sample_at_nb(samples, position, tension):
+def _ax_history_sample_nb(samples, index, is_looped, loop_start, loop_end):
+    if index < 0:
+        return 0.0
+    if is_looped and index >= loop_end:
+        loop_len = max(1, loop_end - loop_start)
+        index = loop_start + ((index - loop_start) % loop_len)
+    if index >= len(samples):
+        return 0.0
+    return float(samples[index])
+
+
+@nb.njit(cache=True, nogil=True)
+def _sample_at_nb(
+    samples,
+    position,
+    step,
+    coefficients,
+    is_looped=False,
+    loop_start=0,
+    loop_end=0,
+):
     n = len(samples)
-    if position <= 0.0:
-        return float(samples[0])
-    if position >= n - 1:
-        return float(samples[n - 1])
-    base = int(position)
-    frac = position - base
-    y0 = float(samples[max(0, base - 1)])
-    y1 = float(samples[base])
-    y2 = float(samples[min(n - 1, base + 1)])
-    y3 = float(samples[min(n - 1, base + 2)])
-    a = tension
-    c0 = (-a * y0) + ((2.0 - a) * y1) + ((a - 2.0) * y2) + (a * y3)
-    c1 = (2.0 * a * y0) + ((a - 3.0) * y1) + ((3.0 - 2.0 * a) * y2) - (a * y3)
-    c2 = (-a * y0) + (a * y2)
-    c3 = y1
-    return ((c0 * frac + c1) * frac + c2) * frac + c3
+    consumed = int(math.floor(max(0.0, position)))
+    frac = max(0.0, position) - consumed
+    if is_looped:
+        loop_start = max(0, min(loop_start, n - 1))
+        loop_end = max(loop_start + 1, min(loop_end, n))
+    y0 = _ax_history_sample_nb(samples, consumed - 4, is_looped, loop_start, loop_end)
+    y1 = _ax_history_sample_nb(samples, consumed - 3, is_looped, loop_start, loop_end)
+    y2 = _ax_history_sample_nb(samples, consumed - 2, is_looped, loop_start, loop_end)
+    y3 = _ax_history_sample_nb(samples, consumed - 1, is_looped, loop_start, loop_end)
+    if step > 4.0 / 3.0:
+        filter_index = 0  # 8 kHz roll-off
+    elif step > 1.0:
+        filter_index = 1  # 12 kHz roll-off
+    else:
+        filter_index = 2  # 16 kHz roll-off
+    phase = min(127, int(frac * 128.0))
+    c = coefficients[filter_index, phase]
+    return y0 * c[0] + y1 * c[1] + y2 * c[2] + y3 * c[3]
+
+
+def _sample_positions_ax(
+    samples: np.ndarray,
+    positions: np.ndarray,
+    step: float,
+    *,
+    is_looped: bool = False,
+    loop_start: int = 0,
+    loop_end: int = 0,
+) -> np.ndarray:
+    if len(samples) == 0 or len(positions) == 0:
+        return np.zeros(len(positions), dtype=np.float32)
+
+    if step > 4.0 / 3.0:
+        filter_index = 0
+    elif step > 1.0:
+        filter_index = 1
+    else:
+        filter_index = 2
+
+    positive = np.maximum(positions, 0.0)
+    consumed = np.floor(positive).astype(np.int64)
+    fractions = positive - consumed
+    phases = np.minimum(127, (fractions * 128.0).astype(np.int64))
+    coefficients = _AX_SRC_COEFFICIENTS_NB[filter_index, phases]
+    indices = consumed[:, None] + np.arange(-4, 0, dtype=np.int64)[None, :]
+    valid = indices >= 0
+    if is_looped:
+        loop_start = max(0, min(int(loop_start), len(samples) - 1))
+        loop_end = max(loop_start + 1, min(int(loop_end), len(samples)))
+        loop_len = loop_end - loop_start
+        indices = np.where(
+            indices >= loop_end,
+            loop_start + np.mod(indices - loop_start, loop_len),
+            indices,
+        )
+    else:
+        valid &= indices < len(samples)
+    safe_indices = np.clip(indices, 0, len(samples) - 1)
+    values = samples[safe_indices] * valid
+    output = np.sum(values * coefficients, axis=1)
+    return output.astype(np.float32, copy=False)
 
 
 @nb.njit(cache=True, nogil=True)
@@ -236,7 +322,7 @@ def _render_voice_loop(
     lpf_alpha, has_lpf,
     bq_b0, bq_b1, bq_b2, bq_a1, bq_a2, has_bq,
     is_looped, loop_start, loop_end,
-    tension, note_table, pitch_table, lfo_sin_table,
+    coefficients, note_table, pitch_table, lfo_sin_table,
 ):
     position = vstate[_VS_POS]
     age = vstate[_VS_AGE]
@@ -260,7 +346,6 @@ def _render_voice_loop(
     env_sus = vstate[_VS_ENV_SUS]
     env_rel = vstate[_VS_ENV_REL]
     env_hold = int(vstate[_VS_ENV_HOLD])
-
     n_samples = len(samples)
     frames = len(out)
     sr_ratio = region_sr / max(1.0, float(out_sr))
@@ -304,8 +389,16 @@ def _render_voice_loop(
         if gain <= 0.0 and done:
             break
 
-        # Sample interpolation
-        smp = _sample_at_nb(samples, position, tension)
+        position += step
+        smp = _sample_at_nb(
+            samples,
+            position,
+            step,
+            coefficients,
+            is_looped,
+            loop_start,
+            loop_end,
+        )
         left = smp * gain * l_gain
         right = smp * gain * r_gain
 
@@ -338,7 +431,6 @@ def _render_voice_loop(
         send_c[i, 1] = right * fx_c
 
         # Advance state
-        position += step
         age += 1
         if sw_age < sw_frames:
             sw_age += 1
@@ -358,10 +450,7 @@ def _render_voice_loop(
 
         # Loop / end-of-sample
         if not done:
-            if is_looped and not released:
-                if position >= loop_end:
-                    position = loop_start + (position - loop_end)
-            elif position >= n_samples - 1:
+            if not is_looped and position >= n_samples:
                 done = True
 
     # Pack state back
@@ -461,8 +550,6 @@ class _Voice:
 
 
 class SequenceRenderer:
-    _AX_INTERPOLATION_TENSION = -1.325
-
     def __init__(self) -> None:
         self._resolver: BankWaveResolver | None = None
         self.last_sequence_truncated = False
@@ -600,7 +687,6 @@ class SequenceRenderer:
             return None
 
         samples = region.samples
-        source = np.arange(len(samples), dtype=np.float64)
         pan = self._combine_pan(track.pan, region.param.pan)
         left_gain, right_gain = self._pan_gains(pan, track.pan_curve)
         gain = (region.param.volume / 127.0) * velocity_gain(velocity) * track.volume * track.main_send
@@ -613,19 +699,16 @@ class SequenceRenderer:
             while cursor < stop:
                 frames = min(chunk_frames, stop - cursor)
                 relative = np.arange(cursor - note_frame, cursor - note_frame + frames, dtype=np.float64)
-                positions = relative * step
-                if region.is_looped:
-                    loop_start = max(0, min(region.loop_start, len(samples) - 1))
-                    loop_end = max(loop_start + 1, min(region.loop_end, len(samples)))
-                    loop_len = max(1, loop_end - loop_start)
-                    mask = positions >= loop_end
-                    if np.any(mask):
-                        positions = positions.copy()
-                        positions[mask] = loop_start + np.mod(positions[mask] - loop_start, loop_len)
-                else:
-                    positions = np.minimum(positions, len(samples) - 1)
+                positions = (relative + 1.0) * step
 
-                mono = np.interp(positions, source, samples).astype(np.float32, copy=False)
+                mono = _sample_positions_ax(
+                    samples,
+                    positions,
+                    step,
+                    is_looped=region.is_looped,
+                    loop_start=region.loop_start,
+                    loop_end=region.loop_end,
+                )
                 out = np.column_stack((mono * gain * left_gain, mono * gain * right_gain))
                 self._apply_master_gain(out, settings.master_gain)
                 yield out.astype(np.float32, copy=False)
@@ -1446,12 +1529,8 @@ class SequenceRenderer:
             return None
 
         out_frames = max(1, int(np.ceil(len(region.samples) / step)))
-        if abs(step - 1.0) < 1.0e-9:
-            mono = region.samples.astype(np.float32, copy=True)
-        else:
-            positions = np.arange(out_frames, dtype=np.float64) * step
-            source = np.arange(len(region.samples), dtype=np.float64)
-            mono = np.interp(positions, source, region.samples).astype(np.float32)
+        positions = (np.arange(out_frames, dtype=np.float64) + 1.0) * step
+        mono = _sample_positions_ax(region.samples, positions, step)
         mono *= self._simple_envelope_gains(region, len(mono), settings.sample_rate)
 
         pan = self._combine_pan(0.0, region.param.pan)
@@ -1493,7 +1572,6 @@ class SequenceRenderer:
                 return
             out_frames = max(1, int(np.ceil(len(region.samples) / step)))
             chunk_frames = max(settings.block_frames * 8, 4096)
-            source = np.arange(len(region.samples), dtype=np.float64)
             env = EnvelopeState()
             env.configure(
                 attack=region.param.attack,
@@ -1514,8 +1592,8 @@ class SequenceRenderer:
                 env.update(AUDIO_FRAME_INTERVAL_MS)
             while cursor < out_frames:
                 frames = min(chunk_frames, out_frames - cursor)
-                positions = (np.arange(cursor, cursor + frames, dtype=np.float64) * step)
-                mono = np.interp(positions, source, region.samples).astype(np.float32)
+                positions = (np.arange(cursor, cursor + frames, dtype=np.float64) + 1.0) * step
+                mono = _sample_positions_ax(region.samples, positions, step)
                 gains = np.empty(frames, dtype=np.float32)
                 gain_cursor = 0
                 while gain_cursor < frames:
@@ -1730,8 +1808,8 @@ class SequenceRenderer:
         # finished, so settle it *before* touching the envelope.  Seeking skips
         # over thousands of long-dead notes, and stepping each one's envelope
         # across the whole skipped span is what made seeking take seconds.
-        looping = voice.region.is_looped and not voice.released
-        if not looping and voice.position >= len(samples) - 1:
+        looping = voice.region.is_looped
+        if not looping and voice.position >= len(samples):
             voice.done = True
             return
 
@@ -1762,13 +1840,6 @@ class SequenceRenderer:
             if voice.released and voice.env.current_gain() == 0.0:
                 voice.done = True
                 return
-
-        if looping:
-            loop_start = max(0, min(voice.region.loop_start, len(samples) - 1))
-            loop_end = max(loop_start + 1, min(voice.region.loop_end, len(samples)))
-            loop_len = max(1, loop_end - loop_start)
-            if voice.position >= loop_end:
-                voice.position = loop_start + ((voice.position - loop_start) % loop_len)
 
     def _render_voice(self, voice: _Voice, track: _TrackMix, frames: int, *, sample_rate: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         out = np.zeros((frames, 2), dtype=np.float32)
@@ -1833,7 +1904,7 @@ class SequenceRenderer:
             lpf_val, has_lpf,
             bq_b0, bq_b1, bq_b2, bq_a1, bq_a2, has_bq,
             voice.region.is_looped, loop_start, loop_end,
-            self._AX_INTERPOLATION_TENSION,
+            _AX_SRC_COEFFICIENTS_NB,
             _NOTE_TABLE_NB, _PITCH_TABLE_NB, _LFO_SIN_TABLE_NB,
         )
 
@@ -1911,27 +1982,8 @@ class SequenceRenderer:
         return wet
 
     @staticmethod
-    def _sample_at(samples: np.ndarray, position: float) -> float:
-        if position <= 0:
-            return float(samples[0])
-        if position >= len(samples) - 1:
-            return float(samples[-1])
-        base = int(position)
-        frac = position - base
-        y0 = float(samples[max(0, base - 1)])
-        y1 = float(samples[base])
-        y2 = float(samples[min(len(samples) - 1, base + 1)])
-        y3 = float(samples[min(len(samples) - 1, base + 2)])
-
-        # AX uses a 4-tap polyphase SRC. A sharper cubic-convolution kernel is
-        # a noticeably closer approximation for transposed one-shot SFX than the
-        # softer Catmull-Rom kernel we used before.
-        a = SequenceRenderer._AX_INTERPOLATION_TENSION
-        c0 = (-a * y0) + ((2.0 - a) * y1) + ((a - 2.0) * y2) + (a * y3)
-        c1 = (2.0 * a * y0) + ((a - 3.0) * y1) + ((3.0 - 2.0 * a) * y2) - (a * y3)
-        c2 = (-a * y0) + (a * y2)
-        c3 = y1
-        return ((c0 * frac + c1) * frac + c2) * frac + c3
+    def _sample_at(samples: np.ndarray, position: float, step: float = 1.0) -> float:
+        return float(_sample_at_nb(samples, position, step, _AX_SRC_COEFFICIENTS_NB))
 
     @staticmethod
     def _combine_pan(track_pan: float, note_pan: int) -> float:
