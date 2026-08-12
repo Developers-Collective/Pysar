@@ -112,25 +112,28 @@ function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, on
 
   return (
     <>
-      <div className="toolbar">
-        <Seg
-          value={filter}
-          onChange={(value) => onFilterChange && onFilterChange(value)}
-          options={[
-            { value: "ALL", label: "All", accent: "all" },
-            { value: "STRM", label: "Stream", accent: "STRM" },
-            { value: "WAVE", label: "Wave", accent: "WAVE" },
-            { value: "SEQ", label: "Sequence", accent: "SEQ" },
-          ]}
-        />
-        <span className="grow"></span>
-        <Button primary onClick={onAddSound}>Add new sound</Button>
-        <Button onClick={() => onReplaceSound && onReplaceSound(replaceSoundId)} disabled={replaceSoundId == null}>
-          Replace sound
-        </Button>
-        <Button onClick={() => onExportSound && onExportSound(exportSoundId)} disabled={exportSoundId == null} title="Export selected sound">
-          Export
-        </Button>
+      <div className="toolbar sounds-toolbar">
+        <div className="sounds-toolbar-filters">
+          <Seg
+            value={filter}
+            onChange={(value) => onFilterChange && onFilterChange(value)}
+            options={[
+              { value: "ALL", label: "All", accent: "all" },
+              { value: "STRM", label: "Stream", accent: "STRM" },
+              { value: "WAVE", label: "Wave", accent: "WAVE" },
+              { value: "SEQ", label: "Sequence", accent: "SEQ" },
+            ]}
+          />
+        </div>
+        <div className="sounds-toolbar-actions">
+          <Button primary onClick={onAddSound}>Add new sound</Button>
+          <Button onClick={() => onReplaceSound && onReplaceSound(replaceSoundId)} disabled={replaceSoundId == null}>
+            Replace sound
+          </Button>
+          <Button onClick={() => onExportSound && onExportSound(exportSoundId)} disabled={exportSoundId == null} title="Export selected sound">
+            Export
+          </Button>
+        </div>
       </div>
 
       <div className="table-wrap" ref={tableWrapRef}>

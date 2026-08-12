@@ -100,8 +100,27 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
   const [refreshRevision, setRefreshRevision] = React.useState(0);
   const [trackIndex, setTrackIndex] = React.useState(0);
   const [follow, setFollow] = React.useState(true);
+  const [exportMenuOpen, setExportMenuOpen] = React.useState(false);
   const codeRef = React.useRef(null);
   const activeLineRef = React.useRef(null);
+  const exportMenuRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (!exportMenuOpen) return undefined;
+    function closeExportMenu(event) {
+      if (event.type === "keydown" && event.key !== "Escape") return;
+      if (event.type !== "keydown" && exportMenuRef.current?.contains(event.target)) return;
+      setExportMenuOpen(false);
+    }
+    document.addEventListener("pointerdown", closeExportMenu);
+    document.addEventListener("keydown", closeExportMenu);
+    return () => {
+      document.removeEventListener("pointerdown", closeExportMenu);
+      document.removeEventListener("keydown", closeExportMenu);
+    };
+  }, [exportMenuOpen]);
+
+  React.useEffect(() => setExportMenuOpen(false), [sound.id, editing]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -156,7 +175,7 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
     }
   }
 
-  async function importSequence() {
+  async function replaceSequence() {
     const result = await runMutation("replace_sequence_dialog", sound.id);
     if (result) {
       setEditing(false);
@@ -266,50 +285,49 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
       data-pysar-reference={pysarReferenceKey({ kind: "sound", id: sound.id })}
       tabIndex={-1}
     >
-      <div className="toolbar">
-        {!editing && (
-          <select
-            className="seq-track-select"
-            value={String(trackIndex)}
-            onChange={(event) => setTrackIndex(parseInt(event.target.value, 10))}
-          >
-            {tracks.map((track) => (
-              <option key={track.index} value={String(track.index)}>
-                {track.name} · {track.lineCount} lines
-              </option>
-            ))}
-          </select>
-        )}
-        {(details?.sharedSounds || []).length > 1 ? (
-          <select
-            className="seq-track-select"
-            value={String(sound.id)}
-            onChange={(event) => onSoundChange?.(parseInt(event.target.value, 10))}
-            disabled={operationBusy || editing}
-            title="Sound using this BRSEQ"
-          >
-            {details.sharedSounds.map((sharedSound) => (
-              <option key={sharedSound.id} value={String(sharedSound.id)}>{sharedSound.name}</option>
-            ))}
-          </select>
-        ) : (details?.labels || []).length > 0 && (
-          <select
-            className="seq-track-select"
-            value={details.startLabel || (details.labels.find((label) => label.startOffset === details.seqLabelOffset)?.name || "")}
-            onChange={(event) => updateStartLabel(event.target.value)}
-            disabled={operationBusy || editing}
-            title="Sound start label"
-          >
-            {details.labels.map((label, index) => (
-              <option key={`${label.name}-${index}`} value={label.name}>{label.name}</option>
-            ))}
-          </select>
-        )}
-        {variations.length > 0 && (
-          <>
-            <span className="sep"></span>
+      <div className="toolbar seq-toolbar">
+        <div className="seq-toolbar-row seq-toolbar-context">
+          {!editing && (
             <select
-              className="seq-track-select"
+              className="seq-track-select seq-track-picker"
+              value={String(trackIndex)}
+              onChange={(event) => setTrackIndex(parseInt(event.target.value, 10))}
+            >
+              {tracks.map((track) => (
+                <option key={track.index} value={String(track.index)}>
+                  {track.name} · {track.lineCount} lines
+                </option>
+              ))}
+            </select>
+          )}
+          {(details?.sharedSounds || []).length > 1 ? (
+            <select
+              className="seq-track-select seq-sound-picker"
+              value={String(sound.id)}
+              onChange={(event) => onSoundChange?.(parseInt(event.target.value, 10))}
+              disabled={operationBusy || editing}
+              title="Sound using this BRSEQ"
+            >
+              {details.sharedSounds.map((sharedSound) => (
+                <option key={sharedSound.id} value={String(sharedSound.id)}>{sharedSound.name}</option>
+              ))}
+            </select>
+          ) : (details?.labels || []).length > 0 && (
+            <select
+              className="seq-track-select seq-sound-picker"
+              value={details.startLabel || (details.labels.find((label) => label.startOffset === details.seqLabelOffset)?.name || "")}
+              onChange={(event) => updateStartLabel(event.target.value)}
+              disabled={operationBusy || editing}
+              title="Sound start label"
+            >
+              {details.labels.map((label, index) => (
+                <option key={`${label.name}-${index}`} value={label.name}>{label.name}</option>
+              ))}
+            </select>
+          )}
+          {variations.length > 0 && (
+            <select
+              className="seq-track-select seq-variation-picker"
               value={selectedVariation?.id || ""}
               title="Sample variation"
               onChange={(event) => {
@@ -319,34 +337,64 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
             >
               <option value="">Default variation</option>
               {variations.map((variation) => (
-                <option key={variation.id} value={variation.id}>
-                  {variation.label}
-                </option>
+                <option key={variation.id} value={variation.id}>{variation.label}</option>
               ))}
             </select>
-          </>
-        )}
-        <span className="grow"></span>
-        {details?.sharedReferenceCount > 1 && <span className="dialog-hint">Shared by {details.sharedReferenceCount} sounds</span>}
-        <Button onClick={() => exportSequence("brseq")} disabled={operationBusy}>Export BRSEQ</Button>
-        <Button onClick={() => exportSequence("midi")} disabled={operationBusy}>Export MIDI</Button>
-        <Button onClick={importSequence} disabled={operationBusy}>Import/Replace…</Button>
-        {editing ? (
-          <>
-            <Button onClick={() => { setEditing(false); setSourceText(details?.sourceText || ""); }} disabled={operationBusy}>Cancel</Button>
-            <Button primary onClick={compileAndApply} disabled={operationBusy}>{operationBusy ? "Compiling…" : "Compile & Apply"}</Button>
-          </>
-        ) : (
-          <Button primary onClick={() => { setOperationError(null); setEditing(true); }} disabled={operationBusy}>Edit MML</Button>
-        )}
-        {!editing && <Toggle on={follow} onChange={setFollow} label="Follow playhead" />}
-        {onDelete && (
-          <Button
-            onClick={() => onDelete(sound)}
-            disabled={operationBusy || !!sound.protected}
-            title={sound.protected ? "Safe Mode protects original sounds from deletion" : "Delete this new sequence sound"}
-          >Delete</Button>
-        )}
+          )}
+          {details?.sharedReferenceCount > 1 && (
+            <span className="seq-shared-badge">{details.sharedReferenceCount} shared sounds</span>
+          )}
+        </div>
+
+        <div className="seq-toolbar-row seq-toolbar-actions">
+          <div className="seq-edit-actions">
+            {editing ? (
+              <>
+                <Button onClick={() => { setEditing(false); setSourceText(details?.sourceText || ""); }} disabled={operationBusy}>Cancel</Button>
+                <Button primary onClick={compileAndApply} disabled={operationBusy}>{operationBusy ? "Compiling…" : "Compile & Apply"}</Button>
+              </>
+            ) : (
+              <Button primary onClick={() => { setOperationError(null); setEditing(true); }} disabled={operationBusy}>Edit MML</Button>
+            )}
+            {!editing && <Toggle on={follow} onChange={setFollow} label="Follow playhead" />}
+          </div>
+
+          <div className="seq-file-actions">
+            <Button
+              onClick={replaceSequence}
+              disabled={operationBusy || editing}
+              title="Replace this sound from a BRSEQ or MIDI file"
+            >Replace sequence…</Button>
+            <div className="seq-export-menu" ref={exportMenuRef}>
+              <Button
+                onClick={() => setExportMenuOpen((open) => !open)}
+                disabled={operationBusy || editing}
+                aria-haspopup="menu"
+                aria-expanded={exportMenuOpen}
+              >Export <span className="seq-menu-caret" aria-hidden="true">⌄</span></Button>
+              {exportMenuOpen && (
+                <div className="menu-dropdown seq-export-dropdown" role="menu">
+                  <button className="menu-entry" role="menuitem" onClick={() => { setExportMenuOpen(false); exportSequence("brseq"); }}>
+                    <span>Export BRSEQ…</span>
+                    <span className="seq-export-hint">Nintendo</span>
+                  </button>
+                  <button className="menu-entry" role="menuitem" onClick={() => { setExportMenuOpen(false); exportSequence("midi"); }}>
+                    <span>Export MIDI…</span>
+                    <span className="seq-export-hint">Standard MIDI</span>
+                  </button>
+                </div>
+              )}
+            </div>
+            {onDelete && (
+              <Button
+                className="seq-delete-action"
+                onClick={() => onDelete(sound)}
+                disabled={operationBusy || editing || !!sound.protected}
+                title={sound.protected ? "Safe Mode protects original sounds from deletion" : "Delete this new sequence sound"}
+              >Delete</Button>
+            )}
+          </div>
+        </div>
       </div>
       {operationError && <div className="seq-operation-error">{operationError}</div>}
       {editing ? (

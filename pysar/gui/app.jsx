@@ -46,6 +46,16 @@ const SOUND_NAV_BY_FILTER = Object.freeze({
 });
 const SOUND_NAV_VIEWS = new Set(Object.keys(SOUND_FILTER_BY_NAV));
 
+const PYSAR_IS_MACOS = /mac/i.test(String(
+  navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || ""
+));
+
+function appShortcut(key, { shift = false, spaced = false } = {}) {
+  const normalizedKey = String(key || "").toUpperCase();
+  if (PYSAR_IS_MACOS) return `${shift ? "⇧" : ""}⌘${spaced ? " " : ""}${normalizedKey}`;
+  return `Ctrl+${shift ? "Shift+" : ""}${normalizedKey}`;
+}
+
 function transportNoteName(midi) {
   const note = Math.max(0, Math.min(127, Math.round(Number(midi) || 0)));
   const names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -3303,7 +3313,7 @@ function App() {
           {menuOpen === "file" && (
             <div className="menu-dropdown" role="menu">
               <button className="menu-entry" onClick={() => { setMenuOpen(null); requestOpen(); }} disabled={loadingArchive || !!dumpStatus?.busy}>
-                Open…<span className="shortcut">⌘O</span>
+                Open…<span className="shortcut">{appShortcut("O")}</span>
               </button>
               <div className="menu-submenu">
                 <button
@@ -3339,14 +3349,14 @@ function App() {
               </div>
               <div className="menu-sep" />
               <button className="menu-entry" onClick={() => { setMenuOpen(null); saveArchive(); }} disabled={!archive}>
-                Save<span className="shortcut">⌘S</span>
+                Save<span className="shortcut">{appShortcut("S")}</span>
               </button>
               <button className="menu-entry" onClick={() => { setMenuOpen(null); saveArchiveAs(); }} disabled={!archive}>
-                Save As…<span className="shortcut">⇧⌘S</span>
+                Save As…<span className="shortcut">{appShortcut("S", { shift: true })}</span>
               </button>
               <div className="menu-sep" />
               <button className="menu-entry" onClick={() => { setMenuOpen(null); requestClose(); }} disabled={!archive}>
-                Close<span className="shortcut">⌘W</span>
+                Close<span className="shortcut">{appShortcut("W")}</span>
               </button>
             </div>
           )}
@@ -3433,7 +3443,7 @@ function App() {
               onChange={(e) => setSearchQuery(e.target.value)}
               disabled={!archive}
             />
-            <kbd>⌘ F</kbd>
+            <kbd>{appShortcut("F", { spaced: true })}</kbd>
           </div>
           {/* Virtual keyboard is intentionally hidden for now. The component stays
               wired below so we can bring it back once the workflow is ready. */}
