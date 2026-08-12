@@ -728,7 +728,7 @@ class SequenceRenderer:
             self._make_runtime_resolver(
                 program_override,
                 note_override,
-                include_looped_natural=settings.one_shot,
+                include_looped_natural=False,
             )
         )
         player.set_random_overrides(settings.seq_random_overrides)

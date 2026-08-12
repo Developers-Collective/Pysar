@@ -4093,7 +4093,7 @@ class PysarApi:
                 formats = (
                     ("WAV audio (*.wav)", ".wav"),
                     ("Nintendo BRSEQ (*.brseq)", ".brseq"),
-                    ("Standard MIDI (*.midi *.mid)", ".midi"),
+                    ("Standard MIDI (*.midi;*.mid)", ".midi"),
                 )
             else:
                 return {"ok": False, "error": "Unsupported sound type"}
@@ -5679,7 +5679,7 @@ class PysarApi:
             if kind == "brseq":
                 formats = (("Nintendo BRSEQ (*.brseq)", ".brseq"),)
             elif kind in {"mid", "midi"}:
-                formats = (("Standard MIDI (*.midi *.mid)", ".midi"),)
+                formats = (("Standard MIDI (*.midi;*.mid)", ".midi"),)
             else:
                 raise ValueError("Export format must be BRSEQ or MIDI")
             suffix = formats[0][1]
