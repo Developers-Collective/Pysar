@@ -1773,6 +1773,42 @@ body.resizing-column * {
   padding: 8px 0;
   line-height: 1.6;
 }
+.seq-track-section + .seq-track-section {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.seq-track-section-header {
+  position: sticky;
+  top: -8px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 28px;
+  padding: 5px 14px 5px 24px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-panel) 94%, transparent);
+  backdrop-filter: blur(8px);
+}
+.seq-track-section-header strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.seq-track-section-header span {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+.seq-track-section.root .seq-track-section-header {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
 .seq-keyboard {
   flex: 0 0 auto;
   height: 84px;
@@ -1805,21 +1841,122 @@ body.resizing-column * {
 .seq-line.kind-time .op { color: #7fcadf; }
 .seq-line.kind-flow .op { color: #ff8c42; }
 .seq-line.kind-control .op { color: #84d8ba; }
-.seq-source-editor {
+.seq-source-editor-shell {
+  display: flex;
   flex: 1;
   min-height: 0;
-  width: 100%;
-  resize: none;
-  border: 0;
-  border-top: 1px solid var(--border-subtle);
-  outline: none;
-  padding: 16px 18px;
+  flex-direction: column;
   background: var(--bg-primary);
-  color: var(--text-primary);
+}
+.seq-source-editor-layer {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  border-top: 1px solid var(--border-subtle);
+  overflow: hidden;
+}
+.seq-source-highlight,
+.seq-source-editor {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 16px 18px 16px 72px;
+  border: 0;
+  outline: none;
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.55;
-  tab-size: 2;
+  tab-size: 4;
+  white-space: pre;
+}
+.seq-source-highlight {
+  overflow: hidden;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  pointer-events: none;
+}
+.seq-source-highlight code {
+  display: block;
+  min-width: max-content;
+  font: inherit;
+}
+.seq-source-editor {
+  resize: none;
+  overflow: auto;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text-primary);
+  -webkit-text-fill-color: transparent;
+}
+.seq-source-editor::selection {
+  background: color-mix(in srgb, var(--accent) 42%, transparent);
+}
+.seq-mml-line {
+  position: relative;
+  display: block;
+  min-height: 1.55em;
+  min-width: 100%;
+}
+.seq-mml-line::before {
+  content: attr(data-line);
+  position: absolute;
+  left: -58px;
+  width: 42px;
+  color: var(--text-quaternary);
+  text-align: right;
+  user-select: none;
+}
+.seq-mml-line.current {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  box-shadow: -72px 0 0 color-mix(in srgb, var(--accent) 15%, transparent);
+}
+.seq-mml-line.error {
+  background: color-mix(in srgb, var(--danger, #ef6461) 14%, transparent);
+  box-shadow: -72px 0 0 color-mix(in srgb, var(--danger, #ef6461) 14%, transparent);
+  text-decoration: underline wavy color-mix(in srgb, var(--danger, #ef6461) 75%, transparent);
+  text-underline-offset: 3px;
+}
+.mml-label { color: #b6a5ff; font-weight: 600; }
+.mml-note { color: #b6a5ff; }
+.mml-command { color: #84d8ba; }
+.mml-flow { color: #ff8c42; }
+.mml-time { color: #7fcadf; }
+.mml-number { color: #f3c97a; }
+.mml-reference { color: #9bb7f6; }
+.mml-constant { color: #f0b132; }
+.mml-comment { color: var(--text-tertiary); font-style: italic; }
+.mml-punctuation { color: var(--text-secondary); }
+.seq-lint-status {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  width: 100%;
+  padding: 5px 14px;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-panel-2);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-align: left;
+  white-space: normal;
+}
+.seq-lint-status:disabled { opacity: 1; cursor: default; }
+.seq-lint-status.error { color: var(--danger, #ef6461); cursor: pointer; }
+.seq-lint-status.valid { color: #84d8ba; }
+.seq-lint-indicator {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.seq-lint-status.checking .seq-lint-indicator {
+  animation: dirty-pulse 0.9s ease-in-out infinite;
 }
 .seq-operation-error {
   padding: 8px 14px;

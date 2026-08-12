@@ -3,6 +3,118 @@ function trackColor(trackIndex) {
   return SEQ_TRACK_COLORS[Math.abs((trackIndex | 0)) % SEQ_TRACK_COLORS.length];
 }
 
+const SEQ_MML_FLOW_COMMANDS = new Set([
+  "alloc_track", "open_track", "jump", "call", "ret", "fin",
+]);
+const SEQ_MML_TIME_COMMANDS = new Set([
+  "wait", "tempo", "timebase", "loop_start", "loop_end",
+]);
+
+function sequenceMmlCommentIndex(line) {
+  const positions = [line.indexOf(";"), line.indexOf("#")].filter((index) => index >= 0);
+  return positions.length ? Math.min(...positions) : -1;
+}
+
+function sequenceMmlTargetRange(source, target, tracks = []) {
+  if (!source || !target) return null;
+  const targetOffset = target.startOffset == null ? NaN : Number(target.startOffset);
+  const targetTrack = Number.isFinite(targetOffset)
+    ? tracks.find((track) => targetOffset >= Number(track.startOffset) && targetOffset < Number(track.endOffset))
+    : null;
+  const candidates = [...new Set([
+    target.name,
+    target.startLabel,
+    Number.isFinite(targetOffset) ? `_entry_${targetOffset.toString(16).toUpperCase().padStart(6, "0")}` : null,
+    targetTrack?.name,
+  ].filter(Boolean).map((name) => String(name).replace(/^::/, "")))];
+
+  let cursor = 0;
+  const lines = String(source).split("\n");
+  const declarations = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const commentIndex = sequenceMmlCommentIndex(line);
+    const code = line.slice(0, commentIndex < 0 ? line.length : commentIndex);
+    const match = code.match(/^\s*((?:::)?[^\s:;]+)\s*:/);
+    if (match) {
+      declarations.push({
+        name: match[1].replace(/^::/, ""),
+        displayName: match[1],
+        start: cursor + line.indexOf(match[1]),
+        line: index + 1,
+      });
+    }
+    cursor += line.length + 1;
+  }
+  for (const candidate of candidates) {
+    const declaration = declarations.find((item) => item.name === candidate);
+    if (declaration) {
+      return {
+        start: declaration.start,
+        end: declaration.start + declaration.displayName.length,
+        line: declaration.line,
+      };
+    }
+  }
+  return null;
+}
+
+function sequenceMmlTokenClass(token, isCommand) {
+  if (/^(?:0x[\da-f]+|[-+]?\d+)$/i.test(token)) return "number";
+  if (isCommand) {
+    const base = token.toLowerCase().replace(/_(?:if|tr|tv|t|r|v)$/, "");
+    if (/^[a-g](?:s|f|#|b)?-?\d+$/.test(base)) return "note";
+    if (SEQ_MML_FLOW_COMMANDS.has(base)) return "flow";
+    if (SEQ_MML_TIME_COMMANDS.has(base)) return "time";
+    return "command";
+  }
+  if (/^[A-Z][A-Z\d_]*$/.test(token)) return "constant";
+  if (/^(?:::)?[A-Za-z_][\w]*$/.test(token)) return "reference";
+  return "";
+}
+
+function SequenceMmlHighlight({ source, focusedLine, errorLine }) {
+  const sourceLines = String(source).split("\n");
+  return sourceLines.map((line, lineIndex) => {
+    const lineNumber = lineIndex + 1;
+    const commentIndex = sequenceMmlCommentIndex(line);
+    const code = line.slice(0, commentIndex < 0 ? line.length : commentIndex);
+    const comment = commentIndex < 0 ? "" : line.slice(commentIndex);
+    const labelMatch = code.match(/^(\s*)((?:::)?[^\s:;]+)(\s*:)(.*)$/);
+    let renderedCode;
+    if (labelMatch) {
+      renderedCode = (
+        <>
+          {labelMatch[1]}<span className="mml-label">{labelMatch[2]}</span><span className="mml-punctuation">{labelMatch[3]}</span>{labelMatch[4]}
+        </>
+      );
+    } else {
+      let commandSeen = false;
+      const tokens = code.match(/0x[\da-f]+|::[A-Za-z_][\w]*|[A-Za-z_][\w]*|[-+]?\d+|\s+|[,()+\-*/%&|^~<>]+|./gi) || [];
+      renderedCode = tokens.map((token, tokenIndex) => {
+        const word = /^(?:0x[\da-f]+|::[A-Za-z_][\w]*|[A-Za-z_][\w]*|[-+]?\d+)$/i.test(token);
+        const isCommand = word && !commandSeen;
+        if (isCommand) commandSeen = true;
+        const tokenClass = sequenceMmlTokenClass(token, isCommand);
+        return tokenClass
+          ? <span key={tokenIndex} className={`mml-${tokenClass}`}>{token}</span>
+          : <React.Fragment key={tokenIndex}>{token}</React.Fragment>;
+      });
+    }
+    const classes = [
+      "seq-mml-line",
+      focusedLine === lineNumber ? "current" : "",
+      errorLine === lineNumber ? "error" : "",
+    ].filter(Boolean).join(" ");
+    return (
+      <span key={`${lineIndex}:${line}`} className={classes} data-line={lineNumber}>
+        {code.length === 0 && !comment ? "\u200B" : renderedCode}
+        {comment && <span className="mml-comment">{comment}</span>}
+      </span>
+    );
+  });
+}
+
 function SeqKeyboard({ activeNotes }) {
   const KEYS = 128;
   const KEY_W = 6;
@@ -89,7 +201,7 @@ function SeqKeyboard({ activeNotes }) {
   );
 }
 
-function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound = null, selectedVariation = null, onVariation, variations = [], onLoadVariations, onSoundChange, onDirty, onDataRefresh, onPlaybackInvalidate, onError, onDelete }) {
+function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, playheadMs = 0, durationMs = 0, isPlaying = false, playingSound = null, selectedVariation = null, onVariation, variations = [], onLoadVariations, onSoundChange, safeMode = true, onDirty, onDataRefresh, onPlaybackInvalidate, onError, onDelete }) {
   const [details, setDetails] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState(null);
@@ -98,12 +210,18 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
   const [editing, setEditing] = React.useState(false);
   const [sourceText, setSourceText] = React.useState("");
   const [refreshRevision, setRefreshRevision] = React.useState(0);
-  const [trackIndex, setTrackIndex] = React.useState(0);
   const [follow, setFollow] = React.useState(true);
   const [exportMenuOpen, setExportMenuOpen] = React.useState(false);
+  const [lintState, setLintState] = React.useState({ status: "idle", error: "", line: null });
   const codeRef = React.useRef(null);
   const activeLineRef = React.useRef(null);
   const exportMenuRef = React.useRef(null);
+  const sourceEditorRef = React.useRef(null);
+  const sourceHighlightRef = React.useRef(null);
+  const preservedEditorSourceRef = React.useRef(null);
+  const lintRequestRef = React.useRef(0);
+  const playbackWasRunningRef = React.useRef(false);
+  const safeModeBlocksEditing = safeMode && sound.isNew !== true;
 
   React.useEffect(() => {
     if (!exportMenuOpen) return undefined;
@@ -123,11 +241,25 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
   React.useEffect(() => setExportMenuOpen(false), [sound.id, editing]);
 
   React.useEffect(() => {
+    if (!safeModeBlocksEditing || !editing) return;
+    setEditing(false);
+    setSourceText(editorSourceText ?? details?.sourceText ?? "");
+    setOperationError(null);
+    setRefreshRevision((value) => value + 1);
+  }, [safeModeBlocksEditing, editing, details?.sourceText]);
+
+  React.useEffect(() => {
+    const preservedSource = (
+      Number(preservedEditorSourceRef.current?.soundId) === Number(sound.id)
+        ? preservedEditorSourceRef.current.sourceText
+        : null
+    );
     let cancelled = false;
-    setDetails(null);
     setError(null);
-    setLoading(true);
-    setTrackIndex(0);
+    if (preservedSource == null) {
+      setDetails(null);
+      setLoading(true);
+    }
     if (!window.pysar) {
       setError("Desktop API is not available");
       setLoading(false);
@@ -137,8 +269,15 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
       if (cancelled) return;
       if (result?.ok) {
         setDetails(result.data);
-        setSourceText(result.data.sourceText || "");
-        setTrackIndex(result.data.startTrackIndex || 0);
+        setSourceText(
+          preservedSource
+          ?? editorSourceText
+          ?? result.data.sourceText
+          ?? ""
+        );
+        if (Number(preservedEditorSourceRef.current?.soundId) === Number(sound.id)) {
+          preservedEditorSourceRef.current = null;
+        }
       } else {
         setError(result?.error || "Could not load sequence");
       }
@@ -178,23 +317,30 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
   async function replaceSequence() {
     const result = await runMutation("replace_sequence_dialog", sound.id);
     if (result) {
+      onEditorSourceCommit?.(sound.id, null);
       setEditing(false);
       setRefreshRevision((value) => value + 1);
     }
   }
 
   async function compileAndApply() {
+    const submittedSource = sourceText;
     const result = await runMutation(
       "compile_sequence_text",
       sound.id,
-      sourceText,
+      submittedSource,
       // Let the backend preserve the old label when it still exists, but
       // fall back to the compiled sequence's default entry when the editor
       // intentionally renamed or removed that label.
       null,
     );
     if (result) {
-      if (result.sourceText != null) setSourceText(result.sourceText);
+      preservedEditorSourceRef.current = {
+        soundId: Number(sound.id),
+        sourceText: submittedSource,
+      };
+      onEditorSourceCommit?.(sound.id, submittedSource);
+      setSourceText(submittedSource);
       setEditing(false);
       setRefreshRevision((value) => value + 1);
     }
@@ -215,9 +361,120 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
   }, [sound.id, onLoadVariations]);
 
   const tracks = details?.tracks || [];
-  const activeTrack = tracks[Math.min(trackIndex, Math.max(0, tracks.length - 1))] || null;
-  const lines = activeTrack?.lines || [];
+  const displayTracks = details?.relatedTracks?.length
+    ? details.relatedTracks
+    : tracks.slice(details?.startTrackIndex || 0, (details?.startTrackIndex || 0) + 1);
   const trace = details?.trace || [];
+  const currentEditorTarget = React.useMemo(() => (
+    (details?.sharedSounds || []).find((candidate) => Number(candidate.id) === Number(sound.id)) || {
+      id: sound.id,
+      name: sound.name,
+      startLabel: details?.startLabel,
+      startOffset: details?.startOffset,
+      seqLabelOffset: details?.seqLabelOffset,
+    }
+  ), [details, sound.id, sound.name]);
+  const currentEditorRange = React.useMemo(
+    () => sequenceMmlTargetRange(sourceText, currentEditorTarget, tracks),
+    [sourceText, currentEditorTarget, tracks],
+  );
+
+  function syncSourceEditorScroll() {
+    if (!sourceEditorRef.current || !sourceHighlightRef.current) return;
+    sourceHighlightRef.current.scrollTop = sourceEditorRef.current.scrollTop;
+    sourceHighlightRef.current.scrollLeft = sourceEditorRef.current.scrollLeft;
+  }
+
+  function cancelEditing() {
+    setEditing(false);
+    setSourceText(editorSourceText ?? details?.sourceText ?? "");
+    setRefreshRevision((value) => value + 1);
+  }
+
+  function jumpToMmlTarget(target, { selectLabel = true } = {}) {
+    const editor = sourceEditorRef.current;
+    if (!editor) return;
+    const range = sequenceMmlTargetRange(sourceText, target, tracks);
+    if (!range) {
+      editor.focus();
+      return;
+    }
+    const lineHeight = parseFloat(window.getComputedStyle(editor).lineHeight) || 19;
+    editor.focus();
+    editor.setSelectionRange(selectLabel ? range.start : range.end, range.end);
+    editor.scrollTop = Math.max(0, (range.line - 4) * lineHeight);
+    syncSourceEditorScroll();
+  }
+
+  function jumpToMmlLine(lineNumber) {
+    const editor = sourceEditorRef.current;
+    const line = Math.max(1, Number(lineNumber) || 1);
+    if (!editor) return;
+    const sourceLines = sourceText.split("\n");
+    const start = sourceLines.slice(0, line - 1).reduce((length, value) => length + value.length + 1, 0);
+    const end = start + (sourceLines[line - 1]?.length || 0);
+    const lineHeight = parseFloat(window.getComputedStyle(editor).lineHeight) || 19;
+    editor.focus();
+    editor.setSelectionRange(start, end);
+    editor.scrollTop = Math.max(0, (line - 4) * lineHeight);
+    syncSourceEditorScroll();
+  }
+
+  function selectSharedSound(nextSoundId) {
+    const nextId = Number(nextSoundId);
+    const target = (details?.sharedSounds || []).find((candidate) => Number(candidate.id) === nextId);
+    if (!target || nextId === Number(sound.id)) return;
+    preservedEditorSourceRef.current = editing
+      ? { soundId: nextId, sourceText }
+      : null;
+    onSoundChange?.(nextId, { reuseActiveTab: true });
+  }
+
+  React.useEffect(() => {
+    if (!editing || !currentEditorTarget) return undefined;
+    if (Number(details?.soundId) !== Number(sound.id)) return undefined;
+    const frame = window.requestAnimationFrame(() => jumpToMmlTarget(currentEditorTarget));
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    editing,
+    sound.id,
+    details?.soundId,
+    currentEditorTarget?.id,
+    currentEditorTarget?.startOffset,
+    tracks,
+  ]);
+
+  React.useEffect(() => {
+    if (!editing) {
+      setLintState({ status: "idle", error: "", line: null });
+      return undefined;
+    }
+    const requestId = ++lintRequestRef.current;
+    setLintState((current) => ({ ...current, status: "checking" }));
+    const timeout = window.setTimeout(() => {
+      if (!window.pysar) {
+        setLintState({ status: "error", error: "Desktop validation API is unavailable", line: null });
+        return;
+      }
+      window.pysar.call("lint_sequence_text", sourceText).then((result) => {
+        if (requestId !== lintRequestRef.current) return;
+        if (!result?.ok || !result.valid) {
+          setLintState({
+            status: "error",
+            error: result?.error || "MML validation failed",
+            line: result?.line == null ? null : Number(result.line),
+          });
+          return;
+        }
+        setLintState({ status: "valid", error: "", line: null });
+      }).catch((error) => {
+        if (requestId !== lintRequestRef.current) return;
+        setLintState({ status: "error", error: String(error), line: null });
+      });
+    }, 350);
+    return () => window.clearTimeout(timeout);
+  }, [editing, sourceText]);
+
   const isThisPlaying = !!playingSound && playingSound.id === sound.id && isPlaying;
   const currentTrace = React.useMemo(() => {
     if (!isThisPlaying || !trace.length) return null;
@@ -229,21 +486,45 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
     return current;
   }, [isThisPlaying, trace, playheadMs]);
   const activeLine = React.useMemo(() => {
-    if (!isThisPlaying || !lines.length) return null;
+    if (!isThisPlaying || !displayTracks.length) return null;
     if (!currentTrace) return null;
-    if (currentTrace.trackIndex !== activeTrack?.index) return null;
-    return lines.find((line) => line.line === currentTrace.line) || null;
-  }, [isThisPlaying, lines, currentTrace, activeTrack?.index]);
-
-  React.useEffect(() => {
-    if (!follow || !currentTrace || currentTrace.trackIndex == null) return;
-    if (currentTrace.trackIndex !== trackIndex) setTrackIndex(currentTrace.trackIndex);
-  }, [follow, currentTrace?.trackIndex, trackIndex]);
+    const currentTrack = displayTracks.find(
+      (track) => Number(track.index) === Number(currentTrace.trackIndex),
+    );
+    return currentTrack?.lines.find(
+      (line) => line.op && Number(line.offset) === Number(currentTrace.offset),
+    ) || null;
+  }, [isThisPlaying, displayTracks, currentTrace]);
 
   React.useEffect(() => {
     if (!follow || !activeLineRef.current || !codeRef.current) return;
-    activeLineRef.current.scrollIntoView({ block: "center", behavior: "smooth" });
+    const container = codeRef.current;
+    const lineRect = activeLineRef.current.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    const nextTop = (
+      container.scrollTop
+      + lineRect.top - containerRect.top
+      - container.clientHeight / 2
+      + lineRect.height / 2
+    );
+    container.scrollTo({ top: Math.max(0, nextTop), behavior: "smooth" });
   }, [follow, activeLine?.line]);
+
+  React.useEffect(() => {
+    if (isThisPlaying) {
+      playbackWasRunningRef.current = true;
+      return undefined;
+    }
+    if (!playbackWasRunningRef.current) return undefined;
+    playbackWasRunningRef.current = false;
+    const reachedEnd = durationMs > 0 && playheadMs >= Math.max(0, durationMs - 50);
+    const returnedToStart = playheadMs <= 1;
+    if (!follow || (!reachedEnd && !returnedToStart)) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      codeRef.current?.scrollTo({ top: 0, left: 0, behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [isThisPlaying, follow, playheadMs, durationMs, sound.id]);
 
   const activeNotes = React.useMemo(() => {
     if (!isThisPlaying || !trace.length) return [];
@@ -287,26 +568,13 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
     >
       <div className="toolbar seq-toolbar">
         <div className="seq-toolbar-row seq-toolbar-context">
-          {!editing && (
-            <select
-              className="seq-track-select seq-track-picker"
-              value={String(trackIndex)}
-              onChange={(event) => setTrackIndex(parseInt(event.target.value, 10))}
-            >
-              {tracks.map((track) => (
-                <option key={track.index} value={String(track.index)}>
-                  {track.name} · {track.lineCount} lines
-                </option>
-              ))}
-            </select>
-          )}
           {(details?.sharedSounds || []).length > 1 ? (
             <select
               className="seq-track-select seq-sound-picker"
               value={String(sound.id)}
-              onChange={(event) => onSoundChange?.(parseInt(event.target.value, 10))}
-              disabled={operationBusy || editing}
-              title="Sound using this BRSEQ"
+              onChange={(event) => selectSharedSound(parseInt(event.target.value, 10))}
+              disabled={operationBusy}
+              title={editing ? "Select a sound and jump to its MML entry" : "Sound using this BRSEQ"}
             >
               {details.sharedSounds.map((sharedSound) => (
                 <option key={sharedSound.id} value={String(sharedSound.id)}>{sharedSound.name}</option>
@@ -317,8 +585,8 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
               className="seq-track-select seq-sound-picker"
               value={details.startLabel || (details.labels.find((label) => label.startOffset === details.seqLabelOffset)?.name || "")}
               onChange={(event) => updateStartLabel(event.target.value)}
-              disabled={operationBusy || editing}
-              title="Sound start label"
+              disabled={operationBusy || editing || safeModeBlocksEditing}
+              title={safeModeBlocksEditing ? "Safe Mode protects the original sequence entry point" : "Sound start label"}
             >
               {details.labels.map((label, index) => (
                 <option key={`${label.name}-${index}`} value={label.name}>{label.name}</option>
@@ -350,11 +618,21 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
           <div className="seq-edit-actions">
             {editing ? (
               <>
-                <Button onClick={() => { setEditing(false); setSourceText(details?.sourceText || ""); }} disabled={operationBusy}>Cancel</Button>
-                <Button primary onClick={compileAndApply} disabled={operationBusy}>{operationBusy ? "Compiling…" : "Compile & Apply"}</Button>
+                <Button onClick={cancelEditing} disabled={operationBusy}>Cancel</Button>
+                <Button
+                  primary
+                  onClick={compileAndApply}
+                  disabled={operationBusy || lintState.status !== "valid"}
+                  title={lintState.status === "error" ? lintState.error : "Compile and replace this sequence"}
+                >{operationBusy ? "Compiling…" : "Compile & Apply"}</Button>
               </>
             ) : (
-              <Button primary onClick={() => { setOperationError(null); setEditing(true); }} disabled={operationBusy}>Edit MML</Button>
+              <Button
+                primary
+                onClick={() => { setOperationError(null); setEditing(true); }}
+                disabled={operationBusy || safeModeBlocksEditing}
+                title={safeModeBlocksEditing ? "Disable Safe Mode to edit this original sequence" : "Edit the BRSEQ MML source"}
+              >Edit MML</Button>
             )}
             {!editing && <Toggle on={follow} onChange={setFollow} label="Follow playhead" />}
           </div>
@@ -362,8 +640,8 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
           <div className="seq-file-actions">
             <Button
               onClick={replaceSequence}
-              disabled={operationBusy || editing}
-              title="Replace this sound from a BRSEQ or MIDI file"
+              disabled={operationBusy || editing || safeModeBlocksEditing}
+              title={safeModeBlocksEditing ? "Disable Safe Mode to replace this original sequence" : "Replace this sound from a BRSEQ or MIDI file"}
             >Replace sequence…</Button>
             <div className="seq-export-menu" ref={exportMenuRef}>
               <Button
@@ -398,33 +676,99 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
       </div>
       {operationError && <div className="seq-operation-error">{operationError}</div>}
       {editing ? (
-        <textarea
-          className="seq-source-editor"
-          value={sourceText}
-          onChange={(event) => setSourceText(event.target.value)}
-          spellCheck={false}
-          disabled={operationBusy}
-          aria-label="BRSEQ MML source"
-        />
+        <div className="seq-source-editor-shell">
+          <div className="seq-source-editor-layer">
+            <pre className="seq-source-highlight" ref={sourceHighlightRef} aria-hidden="true">
+              <code><SequenceMmlHighlight
+                  source={sourceText}
+                  focusedLine={currentEditorRange?.line || null}
+                  errorLine={lintState.status === "error" ? lintState.line : null}
+                /></code>
+            </pre>
+            <textarea
+              ref={sourceEditorRef}
+              className="seq-source-editor"
+              value={sourceText}
+              onChange={(event) => setSourceText(event.target.value)}
+              onScroll={syncSourceEditorScroll}
+              onKeyDown={(event) => {
+                if (event.key !== "Tab") return;
+                event.preventDefault();
+                const editor = event.currentTarget;
+                const start = editor.selectionStart;
+                const end = editor.selectionEnd;
+                setSourceText(`${sourceText.slice(0, start)}    ${sourceText.slice(end)}`);
+                window.requestAnimationFrame(() => editor.setSelectionRange(start + 4, start + 4));
+              }}
+              wrap="off"
+              spellCheck={false}
+              disabled={operationBusy}
+              aria-label="BRSEQ MML source"
+            />
+          </div>
+          <button
+            type="button"
+            className={`seq-lint-status ${lintState.status}`}
+            disabled={lintState.status !== "error" || lintState.line == null}
+            onClick={() => jumpToMmlLine(lintState.line)}
+            title={lintState.error || undefined}
+            aria-live="polite"
+          >
+            <span className="seq-lint-indicator" aria-hidden="true"></span>
+            {lintState.status === "checking" && "Checking MML…"}
+            {lintState.status === "valid" && "No syntax errors"}
+            {lintState.status === "error" && (lintState.error || "MML validation failed")}
+            {lintState.status === "idle" && "MML validation ready"}
+          </button>
+        </div>
       ) : (
         <>
           <div className="seq-code" ref={codeRef}>
-            {lines.map((l) => {
-              const active = activeLine?.line === l.line;
+            {displayTracks.map((track, sectionIndex) => {
+              const relation = track.relation || { kind: sectionIndex === 0 ? "root" : "related" };
+              const relationText = relation.kind === "root"
+                ? "Selected sequence"
+                : relation.kind === "open"
+                  ? `Opened track ${relation.trackNo}`
+                  : relation.kind === "call"
+                    ? "Called sequence"
+                    : relation.kind === "jump"
+                      ? "Jump target"
+                      : relation.kind === "fallthrough"
+                        ? "Continued sequence"
+                      : "Related sequence";
               return (
-              <div
-                key={l.line}
-                ref={active ? activeLineRef : null}
-                className={"seq-line kind-" + l.kind + (active ? " active" : "")}
-              >
-                <span className="lno">{l.line}</span>
-                <span className="off">{l.offsetHex}</span>
-                <span className="lbl">{l.label}</span>
-                <span className="src">
-                  <span className="op">{l.op}</span>{l.op && l.arg && " "}<span className="arg">{l.arg}</span>
-                </span>
-              </div>
-            );})}
+                <section
+                  key={track.index}
+                  className={`seq-track-section ${relation.kind === "root" ? "root" : "related"}`}
+                >
+                  <div className="seq-track-section-header">
+                    <strong>{relation.kind === "root" ? sound.name : (track.displayName || track.name)}</strong>
+                    <span>{relationText}</span>
+                  </div>
+                  {track.lines.map((l) => {
+                    const active = (
+                      activeLine?.line === l.line
+                      && Number(currentTrace?.trackIndex) === Number(track.index)
+                    );
+                    return (
+                      <div
+                        key={l.line}
+                        ref={active ? activeLineRef : null}
+                        className={"seq-line kind-" + l.kind + (active ? " active" : "")}
+                      >
+                        <span className="lno">{l.line}</span>
+                        <span className="off">{l.offsetHex}</span>
+                        <span className="lbl">{l.label}</span>
+                        <span className="src">
+                          <span className="op">{l.op}</span>{l.op && l.arg && " "}<span className="arg">{l.arg}</span>
+                        </span>
+                      </div>
+                    );
+                  })}
+                </section>
+              );
+            })}
           </div>
           <SeqKeyboard activeNotes={activeNotes} />
         </>

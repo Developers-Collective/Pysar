@@ -202,6 +202,7 @@ function App() {
   const [seqVariationBySound, setSeqVariationBySound] = useStateA({});
   const [seqVariationsBySound, setSeqVariationsBySound] = useStateA({});
   const [seqVariationRevision, setSeqVariationRevision] = useStateA(0);
+  const [seqEditorSourceBySound, setSeqEditorSourceBySound] = useStateA({});
   const [strmPlaybackBySound, setStrmPlaybackBySound] = useStateA({});
   const [soundListAutoPlayEnabled, setSoundListAutoPlayEnabled] = useStateA(false);
   const audioRef = React.useRef(null);
@@ -224,6 +225,17 @@ function App() {
 
   const rememberVisibleSounds = useCallbackA((soundIds) => {
     visibleSoundIdsRef.current = Array.isArray(soundIds) ? soundIds : [];
+  }, []);
+
+  const rememberSequenceEditorSource = useCallbackA((soundId, sourceText) => {
+    const id = Number(soundId);
+    if (!Number.isInteger(id) || id < 0) return;
+    setSeqEditorSourceBySound((current) => {
+      const next = { ...current };
+      if (typeof sourceText === "string") next[id] = sourceText;
+      else delete next[id];
+      return next;
+    });
   }, []);
 
   const loadSequenceVariations = useCallbackA((soundId) => {
@@ -479,12 +491,24 @@ function App() {
     queueSoundForPreview(s);
     if (options.record !== false) pushHistory(snapshot(activeTab, navView, item));
   }
-  function selectSharedSequenceSound(soundId) {
+  function selectSharedSequenceSound(soundId, options = {}) {
     const nextId = Number(soundId);
     const nextSound = (window.PYSAR_DATA?.sounds || []).find(
       (sound) => Number(sound.id) === nextId && sound.type === "SEQ"
     );
     if (!nextSound) return;
+    if (options.reuseActiveTab) {
+      const item = { kind: "sound", id: nextSound.id, name: nextSound.name, item: nextSound };
+      setTabs((current) => current.map((currentTab) => (
+        currentTab.id === activeTab && currentTab.kind === "sound"
+          ? { ...currentTab, item: nextSound, title: nextSound.name }
+          : currentTab
+      )));
+      setSelectedItem(item);
+      queueSoundForPreview(nextSound);
+      pushHistory(snapshot(activeTab, navView, item));
+      return;
+    }
     openSound(nextSound);
   }
 
@@ -2357,6 +2381,7 @@ function App() {
     setPlayheadMs(0);
     setDurationMs(0);
     setSeqVariationBySound({});
+    setSeqEditorSourceBySound({});
     seqVariationRevisionRef.current += 1;
     setSeqVariationRevision((revision) => revision + 1);
     seqVariationsBySoundRef.current = {};
@@ -2654,6 +2679,7 @@ function App() {
       soundListAutoPlayEnabledRef.current = false;
       visibleSoundIdsRef.current = [];
       setSoundListAutoPlayEnabled(false);
+      setSeqEditorSourceBySound({});
     }
   }
 
@@ -3115,8 +3141,8 @@ function App() {
     if (result?.requiresConfirmation && !enabled) {
       const confirmed = await window.pysarConfirm(
         "This permits deleting, renaming and reindexing " +
-        "resources that belong to the original game. Replacements that preserve " +
-        "their name and index are already allowed while Safe Mode is on.",
+        "resources that belong to the original game. Some non-structural property " +
+        "edits remain available while Safe Mode is on.",
         {
           title: "Disable Safe Mode",
           confirmLabel: "Disable Safe Mode",
@@ -3218,7 +3244,10 @@ function App() {
       content = (
         <SequenceDetail
           sound={tab.item}
+          editorSourceText={seqEditorSourceBySound[tab.item.id] ?? null}
+          onEditorSourceCommit={rememberSequenceEditorSource}
           playheadMs={playheadMs}
+          durationMs={durationMs}
           isPlaying={isPlaying}
           playingSound={playingSound}
           selectedVariation={seqVariationBySound[tab.item.id] || null}
@@ -3226,6 +3255,7 @@ function App() {
           variations={seqVariationsBySound[tab.item.id] || []}
           onLoadVariations={loadSequenceVariations}
           onSoundChange={selectSharedSequenceSound}
+          safeMode={safeMode}
           onDirty={setDirty}
           onDataRefresh={handleDataRefresh}
           onPlaybackInvalidate={invalidateSequencePlayback}

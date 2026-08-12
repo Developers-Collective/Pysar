@@ -1947,6 +1947,9 @@ class Brsar(EditorBase):
         entry = self._data.sound_entries[sound_index]
         if entry.sound_type != SoundType.SEQ or not isinstance(entry.sound_info, SeqSoundInfo):
             raise BrsarError(f"Sound {sound_index} is not a SEQ sound")
+        self.require_safe_mutation(
+            "replacing its sequence data", "sound", sound_index,
+        )
 
         raw = bytes(brseq_raw)
         replacement = Brseq.from_bytes(raw)
@@ -2020,6 +2023,9 @@ class Brsar(EditorBase):
         entry = self._data.sound_entries[sound_index]
         if entry.sound_type != SoundType.SEQ or not isinstance(entry.sound_info, SeqSoundInfo):
             raise BrsarError(f"Sound {sound_index} is not a SEQ sound")
+        self.require_safe_mutation(
+            "changing its sequence entry point", "sound", sound_index,
+        )
         brseq = self.get_seq(entry.file_index)
         offset = self._seq_effective_label_offset(brseq, str(label_name))
         alloc_track = self._seq_alloc_track_mask(brseq, str(label_name))

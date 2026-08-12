@@ -44,6 +44,54 @@ def _empty_ui_data() -> dict[str, Any]:
     }
 
 
+def _sequence_related_track_order(
+        tracks: list[dict[str, Any]],
+        root_index: int,
+) -> list[dict[str, Any]]:
+    if not tracks or not 0 <= int(root_index) < len(tracks):
+        return []
+
+    def resolve_target(offset: int) -> int | None:
+        offset = int(offset)
+        for candidate in tracks:
+            if int(candidate["startOffset"]) == offset:
+                return int(candidate["index"])
+        for candidate in tracks:
+            if int(candidate["startOffset"]) <= offset < int(candidate["endOffset"]):
+                return int(candidate["index"])
+        return None
+
+    root_index = int(root_index)
+    ordered = []
+    seen: set[int] = set()
+    pending = [{"trackIndex": root_index, "kind": "root", "sourceTrackIndex": None}]
+    while pending:
+        relation = pending.pop()
+        source_index = int(relation["trackIndex"])
+        if source_index in seen:
+            continue
+        seen.add(source_index)
+        ordered.append(relation)
+        source = tracks[source_index]
+        references = sorted(
+            source.get("references", []),
+            key=lambda reference: 0 if reference.get("kind") == "fallthrough" else 1,
+        )
+        children = []
+        for reference in references:
+            target_index = resolve_target(int(reference["targetOffset"]))
+            if target_index is None or target_index == source_index or target_index in seen:
+                continue
+            children.append({
+                "trackIndex": target_index,
+                "kind": str(reference["kind"]),
+                "sourceTrackIndex": source_index,
+                "trackNo": reference.get("trackNo"),
+            })
+        pending.extend(reversed(children))
+    return ordered
+
+
 class PysarApi:
     _MAX_AUDIO_CACHE_BYTES = 128 * 1024 * 1024
     _MAX_SEQUENCE_SOURCE_CACHE_BYTES = 32 * 1024 * 1024
@@ -889,6 +937,27 @@ class PysarApi:
             return {"ok": True, "data": data}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    def lint_sequence_text(self, source_text: str) -> dict:
+        """Validate MML through the same parse/write/read path used by Compile."""
+        import re
+
+        try:
+            from pysar.core.format.rseq import Brseq
+
+            compiled = Brseq.from_text(str(source_text))
+            raw = compiled.to_bytes()
+            Brseq.from_bytes(raw)
+            return {"ok": True, "valid": True}
+        except Exception as exc:
+            message = str(exc) or exc.__class__.__name__
+            line_match = re.search(r"\bLine\s+(\d+)\b", message, flags=re.IGNORECASE)
+            return {
+                "ok": True,
+                "valid": False,
+                "error": message,
+                "line": int(line_match.group(1)) if line_match else None,
+            }
 
     def get_sequence_variations(self, sound_id: int) -> dict:
         try:
@@ -2212,6 +2281,7 @@ class PysarApi:
                     "name": candidate_name,
                     "startLabel": candidate_start_label,
                     "startOffset": candidate_start_offset,
+                    "seqLabelOffset": int(candidate.sound_info.seq_label_offset),
                 }
             )
         return shared_sounds
@@ -2276,15 +2346,34 @@ class PysarApi:
                 return max(0, int(args[0]))
             return 0
 
+        aliases_by_start: dict[int, list[tuple[Any, Any]]] = {}
+        for key, track in seq.tracks.items():
+            aliases_by_start.setdefault(int(track.start_offset), []).append((key, track))
+
+        def alias_priority(item: tuple[Any, Any]) -> tuple[int, int, int, str]:
+            key, track = item
+            key_name = str(key) if isinstance(key, str) else ""
+            return (
+                0 if key_name == name else 1,
+                0 if isinstance(key, str) else 1,
+                0 if key_name and not key_name.startswith("_anon_") else 1,
+                key_name or track.name,
+            )
+
+        canonical_sources = [
+            min(items, key=alias_priority)[1]
+            for _start, items in sorted(aliases_by_start.items())
+        ]
+
         tracks = []
         flat_lines = []
-        line_by_offset: dict[int, dict[str, Any]] = {}
         line_no = 1
-        for index, (_, track) in enumerate(sorted(seq.tracks.items(), key=lambda item: item[1].start_offset)):
+        for index, track in enumerate(canonical_sources):
             tempo = DEFAULT_TEMPO
             timebase = DEFAULT_TIMEBASE
             note_wait = True
             current_ms = 0.0
+            references = []
             lines = [
                 {
                     "line": line_no,
@@ -2316,7 +2405,6 @@ class PysarApi:
                 }
                 lines.append(line)
                 flat_lines.append({**line, "trackIndex": index, "trackName": track.name})
-                line_by_offset[int(cmd.offset or 0)] = {**line, "trackIndex": index, "trackName": track.name}
                 line_no += 1
 
                 delta = command_delta_ticks(cmd, note_wait)
@@ -2332,6 +2420,34 @@ class PysarApi:
                     timebase = max(1, int(cmd.args[0]))
                 elif mml == MML.NOTE_WAIT and cmd.args:
                     note_wait = bool(cmd.args[0])
+                if mml == MML.CALL and cmd.args:
+                    references.append({"kind": "call", "targetOffset": int(cmd.args[0])})
+                elif mml == MML.JUMP and cmd.args:
+                    references.append({"kind": "jump", "targetOffset": int(cmd.args[0])})
+                elif mml == MML.OPEN_TRACK and len(cmd.args) >= 2:
+                    references.append({
+                        "kind": "open",
+                        "trackNo": int(cmd.args[0]),
+                        "targetOffset": int(cmd.args[1]),
+                    })
+
+            last_command = track.commands[-1] if track.commands else None
+            try:
+                last_mml = last_command.get_mml() if last_command is not None else None
+            except Exception:
+                last_mml = None
+            ends_flow = (
+                last_mml in (MML.FIN, MML.RET)
+                or (
+                    last_mml == MML.JUMP
+                    and not bool(getattr(last_command, "has_if", False))
+                )
+            )
+            if last_command is not None and not ends_flow:
+                references.append({
+                    "kind": "fallthrough",
+                    "targetOffset": int(track.end_offset),
+                })
 
             tracks.append(
                 {
@@ -2342,17 +2458,47 @@ class PysarApi:
                     "lineCount": len(lines),
                     "durationMs": int(round(current_ms)),
                     "lines": lines,
+                    "references": references,
                 }
             )
 
         start_track_index = 0
+        selected_label = next(
+            (label for label in seq.labels if label.name == name),
+            None,
+        )
+        root_offset = (
+            int(start_offset)
+            if start_offset is not None
+            else int(selected_label.offset) if selected_label is not None
+            else int(entry.sound_info.seq_label_offset)
+        )
         for track in tracks:
+            if track["startOffset"] <= root_offset < track["endOffset"]:
+                start_track_index = track["index"]
+                break
             if start_label is not None and track["name"] == start_label:
                 start_track_index = track["index"]
                 break
-            if start_offset is not None and track["startOffset"] <= start_offset < track["endOffset"]:
-                start_track_index = track["index"]
-                break
+
+        related_order = _sequence_related_track_order(tracks, start_track_index)
+        related_tracks = []
+        for relation in related_order:
+            related_track = dict(tracks[int(relation["trackIndex"])])
+            related_track["relation"] = relation
+            if relation["kind"] == "root":
+                related_track["displayName"] = name
+            related_tracks.append(related_track)
+
+        line_by_offset: dict[int, dict[str, Any]] = {}
+        for track in related_tracks:
+            for line in track["lines"]:
+                if not line["op"]:
+                    continue
+                line_by_offset.setdefault(
+                    int(line["offset"]),
+                    {**line, "trackIndex": track["index"], "trackName": track["name"]},
+                )
 
         settings = PreviewOptions().to_render_options()
         player = SequenceRenderer().make_sequence_player(context, settings)
@@ -2442,8 +2588,10 @@ class PysarApi:
             "seqLabelOffset": entry.sound_info.seq_label_offset,
             "startTrackIndex": start_track_index,
             "trackCount": len(tracks),
+            "relatedTrackCount": len(related_tracks),
             "lineCount": sum(t["lineCount"] for t in tracks),
             "tracks": tracks,
+            "relatedTracks": related_tracks,
             "flatLines": flat_lines,
             "trace": trace,
         }

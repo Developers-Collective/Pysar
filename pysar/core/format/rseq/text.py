@@ -156,6 +156,40 @@ def _split_prefixed_args(args: list[int], prefixes: list[Prefix], base_arg_count
     return command_args
 
 
+def _validate_command_arity(
+        command_name: str,
+        line_no: int,
+        args: list[int],
+        prefixes: list[Prefix],
+        base_arg_count: int,
+) -> None:
+    expected_prefix_args = {
+        MML.RANDOM: 2,
+        MML.VARIABLE: 1,
+        MML.TIME: 1,
+        MML.TIME_RANDOM: 2,
+        MML.TIME_VARIABLE: 1,
+        MML.IF: 0,
+    }
+    expected = int(base_arg_count)
+    actual = len(args)
+    for prefix in prefixes:
+        prefix_expected = expected_prefix_args.get(prefix.type, 0)
+        expected += prefix_expected
+        actual += len(prefix.args)
+
+    if actual == expected and len(args) == base_arg_count and all(
+            len(prefix.args) == expected_prefix_args.get(prefix.type, 0)
+            for prefix in prefixes
+    ):
+        return
+
+    noun = "argument" if expected == 1 else "arguments"
+    raise ValueError(
+        f"Line {line_no}: '{command_name}' expects {expected} {noun}, got {actual}"
+    )
+
+
 def to_text(data: BrseqData, include_offsets: bool = False) -> str:
     """
     Convert BRSEQ data to RSEQ text format.
@@ -582,6 +616,13 @@ def _parse_command(
                 args, prefixes,
                 min(1 if has_value_prefix else 2, len(args)),
             )
+        has_value_prefix = any(
+            prefix.type in _VALUE_PREFIX_TYPES for prefix in prefixes
+        )
+        _validate_command_arity(
+            original_cmd, line_no, args, prefixes,
+            1 if has_value_prefix else 2,
+        )
         return Command(opcode=note, args=args, prefixes=prefixes)
     except ValueError:
         pass
@@ -625,6 +666,14 @@ def _parse_command(
                 base_arg_count = 1
             args = _split_prefixed_args(args, prefixes, min(base_arg_count, len(args)))
 
+        has_value_prefix = any(
+            prefix.type in _VALUE_PREFIX_TYPES for prefix in prefixes
+        )
+        _validate_command_arity(
+            original_cmd, line_no, args, prefixes,
+            0 if has_value_prefix else len(spec),
+        )
+
         return Command(opcode=mml.value, args=args, prefixes=prefixes)
     except KeyError:
         pass
@@ -640,6 +689,14 @@ def _parse_command(
                 else len(MMLEX_ARG_SPEC.get(mmlex, []))
             )
             args = _split_prefixed_args(args, prefixes, min(base_arg_count, len(args)))
+        has_value_prefix = any(
+            prefix.type in _VALUE_PREFIX_TYPES for prefix in prefixes
+        )
+        _validate_command_arity(
+            original_cmd, line_no, args, prefixes,
+            (0 if mmlex == MMLEX.USERPROC else 1)
+            if has_value_prefix else len(MMLEX_ARG_SPEC.get(mmlex, [])),
+        )
         command = Command(opcode=mmlex.value, args=args, prefixes=prefixes)
         command._is_extended = True
         return command
