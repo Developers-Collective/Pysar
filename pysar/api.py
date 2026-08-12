@@ -2185,6 +2185,37 @@ class PysarApi:
         except Exception:
             pass
 
+    def _sequence_shared_sounds(self, archive, brseq, file_index: int) -> list[dict[str, Any]]:
+        from pysar.core.model.brsar import SeqSoundInfo, SoundType
+
+        shared_sounds = []
+        for candidate_id, candidate in enumerate(archive.data.sound_entries):
+            if (
+                    candidate.sound_type != SoundType.SEQ
+                    or not isinstance(candidate.sound_info, SeqSoundInfo)
+                    or int(candidate.file_index) != int(file_index)
+            ):
+                continue
+            candidate_name = self.archive_service._sound_name(
+                archive,
+                candidate_id,
+                candidate,
+            )
+            candidate_start_label, candidate_start_offset = archive._resolve_seq_start(
+                brseq,
+                candidate_name,
+                int(candidate.sound_info.seq_label_offset),
+            )
+            shared_sounds.append(
+                {
+                    "id": candidate_id,
+                    "name": candidate_name,
+                    "startLabel": candidate_start_label,
+                    "startOffset": candidate_start_offset,
+                }
+            )
+        return shared_sounds
+
     def _sequence_details(self, sound_id: int) -> dict[str, Any]:
         from pysar.core.format.rseq.mml import DEFAULT_TEMPO, DEFAULT_TIMEBASE, MML, is_note
         from pysar.core.format.rseq.text import _format_command
@@ -2203,6 +2234,12 @@ class PysarApi:
         seq = context.brseq.data
         start_label = context.start_label
         start_offset = context.start_offset
+
+        shared_sounds = self._sequence_shared_sounds(
+            archive,
+            context.brseq,
+            int(entry.file_index),
+        )
 
         offset_to_label: dict[int, str] = {}
         for label in seq.labels:
@@ -2398,11 +2435,8 @@ class PysarApi:
                 }
                 for label in seq.labels
             ],
-            "sharedReferenceCount": sum(
-                1 for candidate in archive.data.sound_entries
-                if candidate.sound_type == SoundType.SEQ
-                and int(candidate.file_index) == int(entry.file_index)
-            ),
+            "sharedSounds": shared_sounds,
+            "sharedReferenceCount": len(shared_sounds),
             "startLabel": start_label,
             "startOffset": start_offset,
             "seqLabelOffset": entry.sound_info.seq_label_offset,
@@ -5471,7 +5505,7 @@ class PysarApi:
                 dialog_type=FileDialog.OPEN,
                 allow_multiple=False,
                 file_types=(
-                    "Nintendo BRSEQ / MIDI (*.brseq;*.mid;*.midi)",
+                    "Nintendo BRSEQ or MIDI (*.brseq;*.mid;*.midi)",
                     "Nintendo BRSEQ (*.brseq)",
                     "Standard MIDI (*.mid;*.midi)",
                     "All files (*.*)",

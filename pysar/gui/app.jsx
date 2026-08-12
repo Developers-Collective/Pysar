@@ -469,6 +469,14 @@ function App() {
     queueSoundForPreview(s);
     if (options.record !== false) pushHistory(snapshot(activeTab, navView, item));
   }
+  function selectSharedSequenceSound(soundId) {
+    const nextId = Number(soundId);
+    const nextSound = (window.PYSAR_DATA?.sounds || []).find(
+      (sound) => Number(sound.id) === nextId && sound.type === "SEQ"
+    );
+    if (!nextSound) return;
+    openSound(nextSound);
+  }
 
   function openItem(it, options = {}) {
     setSelectedItem(it);
@@ -3207,6 +3215,7 @@ function App() {
           onVariation={chooseSeqVariation}
           variations={seqVariationsBySound[tab.item.id] || []}
           onLoadVariations={loadSequenceVariations}
+          onSoundChange={selectSharedSequenceSound}
           onDirty={setDirty}
           onDataRefresh={handleDataRefresh}
           onPlaybackInvalidate={invalidateSequencePlayback}

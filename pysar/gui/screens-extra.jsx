@@ -89,7 +89,7 @@ function SeqKeyboard({ activeNotes }) {
   );
 }
 
-function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound = null, selectedVariation = null, onVariation, variations = [], onLoadVariations, onDirty, onDataRefresh, onPlaybackInvalidate, onError, onDelete }) {
+function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound = null, selectedVariation = null, onVariation, variations = [], onLoadVariations, onSoundChange, onDirty, onDataRefresh, onPlaybackInvalidate, onError, onDelete }) {
   const [details, setDetails] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState(null);
@@ -280,7 +280,19 @@ function SequenceDetail({ sound, playheadMs = 0, isPlaying = false, playingSound
             ))}
           </select>
         )}
-        {(details?.labels || []).length > 0 && (
+        {(details?.sharedSounds || []).length > 1 ? (
+          <select
+            className="seq-track-select"
+            value={String(sound.id)}
+            onChange={(event) => onSoundChange?.(parseInt(event.target.value, 10))}
+            disabled={operationBusy || editing}
+            title="Sound using this BRSEQ"
+          >
+            {details.sharedSounds.map((sharedSound) => (
+              <option key={sharedSound.id} value={String(sharedSound.id)}>{sharedSound.name}</option>
+            ))}
+          </select>
+        ) : (details?.labels || []).length > 0 && (
           <select
             className="seq-track-select"
             value={details.startLabel || (details.labels.find((label) => label.startOffset === details.seqLabelOffset)?.name || "")}
