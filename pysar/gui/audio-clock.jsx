@@ -1,7 +1,7 @@
 (function installProgressiveLoopClock(global) {
   "use strict";
 
-  function decideStrmAutoplay(tracks, selectedTrackIndices, enabled, loopEnabled) {
+  function normalizeStrmTrackSelection(tracks, selectedTrackIndices) {
     const orderedTrackIndices = [];
     const seen = new Set();
     for (const track of Array.isArray(tracks) ? tracks : []) {
@@ -18,25 +18,28 @@
         .filter((index) => Number.isInteger(index) && seen.has(index)),
     );
     const validSelection = orderedTrackIndices.filter((index) => requested.has(index));
-    const autoplayEnabled = !!enabled && orderedTrackIndices.length > 1;
-    const currentTrackIndex = validSelection[0] ?? orderedTrackIndices[0] ?? null;
-    const normalizedSelection = autoplayEnabled
-      ? (currentTrackIndex == null ? [] : [currentTrackIndex])
-      : (validSelection.length ? validSelection : orderedTrackIndices);
+    return validSelection.length ? validSelection : orderedTrackIndices;
+  }
 
-    let nextTrackIndex = null;
-    if (autoplayEnabled && !loopEnabled && currentTrackIndex != null) {
-      const position = orderedTrackIndices.indexOf(currentTrackIndex);
-      if (position >= 0 && position + 1 < orderedTrackIndices.length) {
-        nextTrackIndex = orderedTrackIndices[position + 1];
-      }
+  function nextVisibleSoundId(visibleSoundIds, currentSoundId) {
+    const orderedSoundIds = [];
+    const seen = new Set();
+    for (const item of Array.isArray(visibleSoundIds) ? visibleSoundIds : []) {
+      const id = Number(item && typeof item === "object" ? item.id : item);
+      if (!Number.isInteger(id) || id < 0 || seen.has(id)) continue;
+      seen.add(id);
+      orderedSoundIds.push(id);
     }
-    return {
-      enabled: autoplayEnabled,
-      selectedTrackIndices: normalizedSelection,
-      currentTrackIndex,
-      nextTrackIndex,
-    };
+
+    const currentId = Number(
+      currentSoundId && typeof currentSoundId === "object"
+        ? currentSoundId.id
+        : currentSoundId,
+    );
+    const position = orderedSoundIds.indexOf(currentId);
+    return position >= 0 && position + 1 < orderedSoundIds.length
+      ? orderedSoundIds[position + 1]
+      : null;
   }
 
   class ProgressiveLoopClock {
@@ -81,5 +84,6 @@
   }
 
   global.PysarProgressiveLoopClock = ProgressiveLoopClock;
-  global.PysarStrmAutoplayDecision = decideStrmAutoplay;
+  global.PysarStrmTrackSelection = normalizeStrmTrackSelection;
+  global.PysarNextVisibleSoundId = nextVisibleSoundId;
 })(typeof window !== "undefined" ? window : globalThis);

@@ -26,7 +26,7 @@ const SOUND_TABLE_COLUMNS = [
   ...SOUND_COLUMNS,
 ];
 
-function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, onOpen, onActivate, onWarm, openId, density, onPlay, playingId, onAddSound, onReplaceSound, onExportSound, selectedSoundId }) {
+function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, onOpen, onActivate, onWarm, onVisibleSoundsChange, openId, density, onPlay, playingId, onAddSound, onReplaceSound, onExportSound, selectedSoundId }) {
   const D = window.PYSAR_DATA;
   const [sortBy, setSortBy] = useStateS("id");
   const [sortDir, setSortDir] = useStateS("asc");
@@ -65,6 +65,10 @@ function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, on
     });
     return r;
   }, [D, filter, sortBy, sortDir, trimmedQuery]);
+
+  useEffectS(() => {
+    onVisibleSoundsChange?.(rows.map((sound) => sound.id));
+  }, [rows, onVisibleSoundsChange]);
 
   const visibleColumnDefs = SOUND_COLUMNS;
   const replaceSoundId = rows.some((s) => s.id === selectedSoundId) ? selectedSoundId : null;

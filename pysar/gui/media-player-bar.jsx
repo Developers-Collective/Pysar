@@ -119,10 +119,6 @@ function MediaPlayerBar({ playingSound, playingId, isPlaying, playheadMs, durati
   }
 
   function toggleStrmTrack(index) {
-    if (strmPlayback?.autoPlayEnabled) {
-      onStrmTrackSelectionChange?.([index]);
-      return;
-    }
     const selected = selectedTrackIndices.includes(index)
       ? selectedTrackIndices.filter((item) => item !== index)
       : [...selectedTrackIndices, index].sort((a, b) => a - b);
@@ -179,11 +175,10 @@ function MediaPlayerBar({ playingSound, playingId, isPlaying, playheadMs, durati
                     />
                     <span>Loop</span>
                   </label>
-                  <label className={"tp-loop" + (strmTracks.length > 1 ? "" : " unavailable")} title={strmTracks.length > 1 ? "Play BRSTM tracks in authored order when Loop is off; stop after the last track" : "Autoplay needs at least two BRSTM tracks"}>
+                  <label className="tp-loop" title="Play the next sound in the current list when this sound finishes">
                     <input
                       type="checkbox"
                       checked={!!strmPlayback?.autoPlayEnabled}
-                      disabled={strmTracks.length <= 1}
                       onChange={(event) => onStrmAutoPlayChange?.(event.target.checked)}
                     />
                     <span>Autoplay</span>
@@ -203,8 +198,7 @@ function MediaPlayerBar({ playingSound, playingId, isPlaying, playheadMs, durati
                           return (
                             <label key={index} className="tp-track-option">
                               <input
-                                type={strmPlayback?.autoPlayEnabled ? "radio" : "checkbox"}
-                                name={strmPlayback?.autoPlayEnabled ? `strm-autoplay-${playingSound.id}` : undefined}
+                                type="checkbox"
                                 checked={checked}
                                 onChange={() => toggleStrmTrack(index)}
                               />
@@ -255,7 +249,7 @@ function MediaPlayerBar({ playingSound, playingId, isPlaying, playheadMs, durati
             <button className="tp-play" onClick={() => isPlaying ? onPause() : onPlay()} disabled={!playingSound} title={isPlaying ? "Pause" : "Play"}>
               {isPlaying ? <TP.Pause /> : <TP.Play />}
             </button>
-            <button className="tp-skip" onClick={() => onNext ? onNext() : onSeek(durationMs, { resume: isPlaying })} disabled={!playingSound} title={strmPlayback?.autoPlayEnabled ? "Next BRSTM track" : "Next"}><TP.SkipForward /></button>
+            <button className="tp-skip" onClick={() => onNext ? onNext() : onSeek(durationMs, { resume: isPlaying })} disabled={!playingSound} title="Next sound in list"><TP.SkipForward /></button>
           </div>
           <div className="tp-progress">
             <span>{formatMediaTime(shownPlayheadMs)}</span>

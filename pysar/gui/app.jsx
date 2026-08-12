@@ -193,6 +193,7 @@ function App() {
   const [seqVariationsBySound, setSeqVariationsBySound] = useStateA({});
   const [seqVariationRevision, setSeqVariationRevision] = useStateA(0);
   const [strmPlaybackBySound, setStrmPlaybackBySound] = useStateA({});
+  const [soundListAutoPlayEnabled, setSoundListAutoPlayEnabled] = useStateA(false);
   const audioRef = React.useRef(null);
   const playingSoundRef = React.useRef(null);
   const audioBaseRef = React.useRef(0);
@@ -205,9 +206,15 @@ function App() {
   const strmPlaybackLoadsRef = React.useRef(new Set());
   const strmPlaybackRevisionRef = React.useRef(0);
   const strmTrackTransitionRef = React.useRef(null);
+  const soundListAutoPlayEnabledRef = React.useRef(false);
+  const visibleSoundIdsRef = React.useRef([]);
   const seqVariationsBySoundRef = React.useRef({});
   const seqVariationLoadsRef = React.useRef(new Set());
   const seqVariationRevisionRef = React.useRef(0);
+
+  const rememberVisibleSounds = useCallbackA((soundIds) => {
+    visibleSoundIdsRef.current = Array.isArray(soundIds) ? soundIds : [];
+  }, []);
 
   const loadSequenceVariations = useCallbackA((soundId) => {
     const id = Number(soundId);
@@ -1770,20 +1777,15 @@ function App() {
     const current = strmPlaybackBySoundRef.current[soundId] || {};
     const looped = !!metadata?.looped;
     const loopLayoutChanged = current.looped !== looped;
-    const loopEnabled = loopLayoutChanged ? looped : (typeof current.loopEnabled === "boolean" ? current.loopEnabled : looped);
-    const autoplay = window.PysarStrmAutoplayDecision(
-      tracks,
-      current.selectedTrackIndices,
-      current.autoPlayEnabled,
-      loopEnabled,
-    );
+    const preferredLoopEnabled = loopLayoutChanged ? looped : (typeof current.loopEnabled === "boolean" ? current.loopEnabled : looped);
+    const loopEnabled = soundListAutoPlayEnabledRef.current ? false : preferredLoopEnabled;
+    const selectedTrackIndices = window.PysarStrmTrackSelection(tracks, current.selectedTrackIndices);
     return setStrmPlayback(soundId, {
       looped,
       loopStartMs: Math.max(0, Number(metadata?.loopStartMs) || 0),
       tracks,
-      selectedTrackIndices: autoplay.selectedTrackIndices,
-      loopEnabled: autoplay.enabled ? false : loopEnabled,
-      autoPlayEnabled: autoplay.enabled,
+      selectedTrackIndices,
+      loopEnabled,
     });
   }
   function loadStrmPlaybackMetadata(sound) {
@@ -1805,11 +1807,11 @@ function App() {
   function changeStrmLoop(loopEnabled) {
     const sound = playingSoundRef.current || playingSound;
     if (!sound || sound.type !== "STRM") return;
-    setStrmPlayback(sound.id, {
-      loopEnabled: !!loopEnabled,
-      // Loop and track autoplay are mutually exclusive transport modes.
-      autoPlayEnabled: loopEnabled ? false : !!strmPlaybackBySoundRef.current[sound.id]?.autoPlayEnabled,
-    });
+    setStrmPlayback(sound.id, { loopEnabled: !!loopEnabled });
+    if (loopEnabled) {
+      soundListAutoPlayEnabledRef.current = false;
+      setSoundListAutoPlayEnabled(false);
+    }
     if (playingId !== sound.id) return;
     // Both BRSTM Web Audio adapters own their audio clock, so loop state can
     // change without a refetch, restart, or phase jump.
@@ -1821,12 +1823,7 @@ function App() {
   function changeStrmTrackSelection(selectedTrackIndices) {
     if (!playingSound || playingSound.type !== "STRM") return;
     const current = strmPlaybackBySoundRef.current[playingSound.id] || {};
-    const selection = window.PysarStrmAutoplayDecision(
-      current.tracks,
-      selectedTrackIndices,
-      current.autoPlayEnabled,
-      current.loopEnabled,
-    ).selectedTrackIndices;
+    const selection = window.PysarStrmTrackSelection(current.tracks, selectedTrackIndices);
     const next = setStrmPlayback(playingSound.id, { selectedTrackIndices: selection });
     if (playingId !== playingSound.id) return;
     if (isPlaying) {
@@ -1842,36 +1839,16 @@ function App() {
     const sound = playingSoundRef.current || playingSound;
     if (!sound || sound.type !== "STRM") return;
     const current = strmPlaybackBySoundRef.current[sound.id] || {};
-    const autoplay = window.PysarStrmAutoplayDecision(
-      current.tracks,
-      current.selectedTrackIndices,
-      autoPlayEnabled,
-      current.loopEnabled,
-    );
-    const selectionChanged = (
-      autoplay.selectedTrackIndices.length !== (current.selectedTrackIndices || []).length
-      || autoplay.selectedTrackIndices.some((index, position) => index !== current.selectedTrackIndices[position])
-    );
-    const next = setStrmPlayback(sound.id, {
-      autoPlayEnabled: autoplay.enabled,
-      selectedTrackIndices: autoplay.selectedTrackIndices,
-      loopEnabled: autoplay.enabled ? false : !!current.loopEnabled,
-    });
-    if (autoplay.enabled && current.loopEnabled) {
+    const enabled = !!autoPlayEnabled;
+    soundListAutoPlayEnabledRef.current = enabled;
+    setSoundListAutoPlayEnabled(enabled);
+    if (enabled && current.loopEnabled) {
+      setStrmPlayback(sound.id, { loopEnabled: false });
       audioRef.current?.setLoopEnabled?.(false);
       if (audioRef.current?.isWebAudioLoop || audioRef.current?.isProgressiveStrmLoop) {
         setPlayheadMs(Math.round(audioRef.current.currentTime * 1000));
       }
     }
-    if (!selectionChanged || playingId !== sound.id) return;
-    if (isPlaying) {
-      playStrmTrackTransition(sound, playheadMs, next.selectedTrackIndices);
-      return;
-    }
-    // A paused stream still owns audio for the old channel mix. Force the
-    // next Play to request the selected autoplay track.
-    playRequestRef.current += 1;
-    clearAudio();
   }
   function sequenceVariationFor(sound) {
     if (!sound) return null;
@@ -1879,6 +1856,21 @@ function App() {
       return sound.seqVariation || null;
     }
     return seqVariationBySound[sound.id] || null;
+  }
+  function advanceToNextVisibleSound(currentSound, options = {}) {
+    if (!currentSound || currentSound.kind === "wave" || currentSound.kind === "bank_note") return false;
+    const nextSoundId = window.PysarNextVisibleSoundId(
+      visibleSoundIdsRef.current,
+      currentSound.id,
+    );
+    if (nextSoundId == null) return false;
+    const nextSound = (window.PYSAR_DATA?.sounds || []).find((sound) => Number(sound.id) === nextSoundId);
+    if (!nextSound) return false;
+
+    setSelectedItem({ kind: "sound", id: nextSound.id, name: nextSound.name, item: nextSound });
+    if (options.resume) play(nextSound, 0, true);
+    else queueSoundForPreview(nextSound);
+    return true;
   }
   async function play(s, offsetMs = 0, force = false, explicitStrmTrackIndices = null) {
     // A direct playback request supersedes any pending authored-track jump.
@@ -1949,20 +1941,10 @@ function App() {
           play(transportSound, loopStartMs, true, playback.selectedTrackIndices);
         }
       } else {
-        const autoplay = transportSound.type === "STRM"
-          ? window.PysarStrmAutoplayDecision(
-              playback?.tracks,
-              playback?.selectedTrackIndices,
-              playback?.autoPlayEnabled,
-              playback?.loopEnabled,
-            )
-          : null;
-        if (autoplay?.nextTrackIndex != null) {
-          const selectedTrackIndices = [autoplay.nextTrackIndex];
-          setStrmPlayback(transportSound.id, { selectedTrackIndices });
-          playStrmTrackTransition(transportSound, 0, selectedTrackIndices);
-          return;
-        }
+        if (
+          soundListAutoPlayEnabledRef.current
+          && advanceToNextVisibleSound(transportSound, { resume: true })
+        ) return;
         setIsPlaying(false);
         setPlayheadMs(endedDuration || result.durationMs || currentDuration || 0);
         setPlayingId(null);
@@ -2040,7 +2022,7 @@ function App() {
     const audio = audioRef.current;
     audio?.pause();
     if (audio?.ended || strmTrackTransitionRef.current === playRequestRef.current) {
-      // A natural BRSTM end may already be awaiting the next autoplay URL.
+      // A natural end may already be awaiting the next autoplay URL.
       // Invalidate that request so Pause during the transition stays paused.
       playRequestRef.current += 1;
       strmTrackTransitionRef.current = null;
@@ -2199,34 +2181,10 @@ function App() {
       play(playingSound, next, true);
     }
   }
-  function nextTransportTrack() {
+  function nextTransportSound() {
     const sound = playingSoundRef.current || playingSound;
-    const playback = sound?.type === "STRM" ? strmPlaybackBySoundRef.current[sound.id] : null;
-    const autoplay = playback
-      ? window.PysarStrmAutoplayDecision(
-          playback.tracks,
-          playback.selectedTrackIndices,
-          playback.autoPlayEnabled,
-          playback.loopEnabled,
-        )
-      : null;
-    if (autoplay?.nextTrackIndex == null) {
-      seek(durationMs, { resume: isPlaying });
-      return;
-    }
-
-    const selectedTrackIndices = [autoplay.nextTrackIndex];
-    setStrmPlayback(sound.id, { selectedTrackIndices });
-    setPlayheadMs(0);
-    if (isPlaying) {
-      playStrmTrackTransition(sound, 0, selectedTrackIndices);
-      return;
-    }
-    // A paused manual skip selects the next track without starting it. Drop
-    // the previous mix so the following Play cannot resume stale audio.
-    playRequestRef.current += 1;
-    clearAudio();
-    setIsPlaying(false);
+    if (advanceToNextVisibleSound(sound, { resume: isPlaying })) return;
+    seek(durationMs, { resume: isPlaying });
   }
   function resumeCurrent() {
     const currentSound = playingSoundRef.current || playingSound;
@@ -2394,6 +2352,9 @@ function App() {
     strmPlaybackRevisionRef.current += 1;
     strmPlaybackLoadsRef.current.clear();
     setStrmPlaybackBySound({});
+    soundListAutoPlayEnabledRef.current = false;
+    visibleSoundIdsRef.current = [];
+    setSoundListAutoPlayEnabled(false);
     if (Array.isArray(recent)) setRecentArchives(recent);
     else refreshRecentArchives();
   }
@@ -2672,6 +2633,9 @@ function App() {
       setSoundFilter("ALL");
       strmPlaybackBySoundRef.current = {};
       setStrmPlaybackBySound({});
+      soundListAutoPlayEnabledRef.current = false;
+      visibleSoundIdsRef.current = [];
+      setSoundListAutoPlayEnabled(false);
     }
   }
 
@@ -3225,7 +3189,7 @@ function App() {
       onExportSound: exportSound,
       selectedSoundId: selectedItem?.kind === "sound" ? selectedItem.id : null,
     };
-    if (tab.view === "all") content = <SoundsScreen filter={soundFilter} onFilterChange={changeSoundFilter} query={searchQuery} onClearSearch={() => setSearchQuery("")} onOpen={selectOnly} onActivate={openSound} onWarm={warmSoundPreview} openId={selectedItem?.kind === "sound" ? selectedItem.id : null} density={tw.density} onPlay={play} playingId={playingId && isPlaying ? playingId : null} {...soundTableActions} />;
+    if (tab.view === "all") content = <SoundsScreen filter={soundFilter} onFilterChange={changeSoundFilter} query={searchQuery} onClearSearch={() => setSearchQuery("")} onOpen={selectOnly} onActivate={openSound} onWarm={warmSoundPreview} onVisibleSoundsChange={rememberVisibleSounds} openId={selectedItem?.kind === "sound" ? selectedItem.id : null} density={tw.density} onPlay={play} playingId={playingId && isPlaying ? playingId : null} {...soundTableActions} />;
     else if (tab.view === "banks") content = <BanksTab query={searchQuery} onSelect={selectOrgItem} onActivate={openItem} onRename={renameBank} onDelete={deleteBank} openId={selectedItem?.kind === "bank" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
     else if (tab.view === "groups") content = <GroupsTab query={searchQuery} onOpen={selectOrgItem} onNavigate={navigateToReferrer} openId={selectedItem?.kind === "group" ? selectedItem.id : null} safeMode={safeMode} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
     else if (tab.view === "players") content = <PlayersTab query={searchQuery} onOpen={selectOrgItem} onClear={() => setSelectedItem(null)} openId={selectedItem?.kind === "player" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
@@ -3566,13 +3530,16 @@ function App() {
         playheadMs={playheadMs}
         durationMs={durationMs}
         volume={volume}
-        strmPlayback={playingSound?.type === "STRM" ? strmPlaybackBySound[playingSound.id] : null}
+        strmPlayback={playingSound?.type === "STRM" ? {
+          ...(strmPlaybackBySound[playingSound.id] || {}),
+          autoPlayEnabled: soundListAutoPlayEnabled,
+        } : null}
         seqVariations={playingSound?.type === "SEQ" ? seqVariationsBySound[playingSound.id] : null}
         onPlay={resumeCurrent}
         onPause={pause}
         onStop={stop}
         onSeek={seek}
-        onNext={nextTransportTrack}
+        onNext={nextTransportSound}
         onVolume={changeVolume}
         onStrmLoopChange={changeStrmLoop}
         onStrmAutoPlayChange={changeStrmAutoPlay}
