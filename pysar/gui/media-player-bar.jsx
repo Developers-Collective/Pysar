@@ -58,7 +58,7 @@ function getMediaPlayerTheme(item) {
   return MEDIA_PLAYER_THEMES[item.type] || MEDIA_PLAYER_THEMES.DEFAULT;
 }
 
-function MediaPlayerBar({ playingSound, playingId, isPlaying, playheadMs, durationMs, volume, strmPlayback, seqVariations, onPlay, onPause, onStop, onSeek, onNext, onVolume, onStrmLoopChange, onStrmAutoPlayChange, onStrmTrackSelectionChange, onSeqVariationChange }) {
+function MediaPlayerBar({ playingSound, playingId, isPlaying, playheadMs, durationMs, volume, strmPlayback, autoPlayEnabled, seqVariations, onPlay, onPause, onStop, onSeek, onNext, onVolume, onStrmLoopChange, onAutoPlayChange, onStrmTrackSelectionChange, onSeqVariationChange }) {
   const [volumeOpen, setVolumeOpen] = useStateT(false);
   const [scrubMs, setScrubMs] = useStateT(null);
   const [tracksOpen, setTracksOpen] = useStateT(false);
@@ -68,6 +68,7 @@ function MediaPlayerBar({ playingSound, playingId, isPlaying, playheadMs, durati
   const playbackIcon = pysarIconForPlayback(playingSound);
   const isStrmTransport = playingSound?.type === "STRM";
   const isSeqTransport = playingSound?.type === "SEQ";
+  const isSoundTransport = window.PysarIsSoundListTransport(playingSound);
   const strmTracks = Array.isArray(strmPlayback?.tracks) ? strmPlayback.tracks : [];
   const selectedTrackIndices = Array.isArray(strmPlayback?.selectedTrackIndices) ? strmPlayback.selectedTrackIndices : [];
   const variationOptionsReady = Array.isArray(seqVariations);
@@ -164,52 +165,56 @@ function MediaPlayerBar({ playingSound, playingId, isPlaying, playheadMs, durati
           </div>
           <div className="tp-controls">
             <div className="tp-cluster">
-              {isStrmTransport && (
+              {isSoundTransport && (
                 <div className="tp-strm-controls">
-                  <label className={"tp-loop" + (strmPlayback?.looped ? "" : " unavailable")} title={strmPlayback?.looped ? "Loop this BRSTM at its embedded loop point" : "This BRSTM has no embedded loop point"}>
-                    <input
-                      type="checkbox"
-                      checked={!!strmPlayback?.loopEnabled}
-                      disabled={!strmPlayback?.looped}
-                      onChange={(event) => onStrmLoopChange?.(event.target.checked)}
-                    />
-                    <span>Loop</span>
-                  </label>
+                  {isStrmTransport && (
+                    <label className={"tp-loop" + (strmPlayback?.looped ? "" : " unavailable")} title={strmPlayback?.looped ? "Loop this BRSTM at its embedded loop point" : "This BRSTM has no embedded loop point"}>
+                      <input
+                        type="checkbox"
+                        checked={!!strmPlayback?.loopEnabled}
+                        disabled={!strmPlayback?.looped}
+                        onChange={(event) => onStrmLoopChange?.(event.target.checked)}
+                      />
+                      <span>Loop</span>
+                    </label>
+                  )}
                   <label className="tp-loop" title="Play the next sound in the current list when this sound finishes">
                     <input
                       type="checkbox"
-                      checked={!!strmPlayback?.autoPlayEnabled}
-                      onChange={(event) => onStrmAutoPlayChange?.(event.target.checked)}
+                      checked={!!autoPlayEnabled}
+                      onChange={(event) => onAutoPlayChange?.(event.target.checked)}
                     />
                     <span>Autoplay</span>
                   </label>
-                  <div className="tp-track-wrap">
-                    <button className="tp-track-trigger" onClick={() => setTracksOpen((open) => !open)} disabled={strmTracks.length === 0} aria-expanded={tracksOpen} title="Choose BRSTM tracks">
-                      <span>{trackSummary}</span>
-                      <TP.ChevronUp />
-                    </button>
-                    {tracksOpen && (
-                      <div className="tp-track-pop">
-                        <div className="tp-track-pop-title">BRSTM tracks</div>
-                        {strmTracks.map((track) => {
-                          const index = Number(track.index);
-                          const channels = (track.channels || []).map((channel) => Number(channel) + 1).join(", ");
-                          const checked = selectedTrackIndices.includes(index);
-                          return (
-                            <label key={index} className="tp-track-option">
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={() => toggleStrmTrack(index)}
-                              />
-                              <span>Track {index + 1}</span>
-                              <small>Ch. {channels}</small>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
+                  {isStrmTransport && (
+                    <div className="tp-track-wrap">
+                      <button className="tp-track-trigger" onClick={() => setTracksOpen((open) => !open)} disabled={strmTracks.length === 0} aria-expanded={tracksOpen} title="Choose BRSTM tracks">
+                        <span>{trackSummary}</span>
+                        <TP.ChevronUp />
+                      </button>
+                      {tracksOpen && (
+                        <div className="tp-track-pop">
+                          <div className="tp-track-pop-title">BRSTM tracks</div>
+                          {strmTracks.map((track) => {
+                            const index = Number(track.index);
+                            const channels = (track.channels || []).map((channel) => Number(channel) + 1).join(", ");
+                            const checked = selectedTrackIndices.includes(index);
+                            return (
+                              <label key={index} className="tp-track-option">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => toggleStrmTrack(index)}
+                                />
+                                <span>Track {index + 1}</span>
+                                <small>Ch. {channels}</small>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
               {isSeqTransport && (

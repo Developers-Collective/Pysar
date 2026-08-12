@@ -1835,14 +1835,14 @@ function App() {
     playRequestRef.current += 1;
     clearAudio();
   }
-  function changeStrmAutoPlay(autoPlayEnabled) {
+  function changeSoundListAutoPlay(autoPlayEnabled) {
     const sound = playingSoundRef.current || playingSound;
-    if (!sound || sound.type !== "STRM") return;
-    const current = strmPlaybackBySoundRef.current[sound.id] || {};
+    if (!window.PysarIsSoundListTransport(sound)) return;
     const enabled = !!autoPlayEnabled;
     soundListAutoPlayEnabledRef.current = enabled;
     setSoundListAutoPlayEnabled(enabled);
-    if (enabled && current.loopEnabled) {
+    const current = sound.type === "STRM" ? (strmPlaybackBySoundRef.current[sound.id] || {}) : null;
+    if (enabled && current?.loopEnabled) {
       setStrmPlayback(sound.id, { loopEnabled: false });
       audioRef.current?.setLoopEnabled?.(false);
       if (audioRef.current?.isWebAudioLoop || audioRef.current?.isProgressiveStrmLoop) {
@@ -3530,10 +3530,8 @@ function App() {
         playheadMs={playheadMs}
         durationMs={durationMs}
         volume={volume}
-        strmPlayback={playingSound?.type === "STRM" ? {
-          ...(strmPlaybackBySound[playingSound.id] || {}),
-          autoPlayEnabled: soundListAutoPlayEnabled,
-        } : null}
+        strmPlayback={playingSound?.type === "STRM" ? strmPlaybackBySound[playingSound.id] : null}
+        autoPlayEnabled={soundListAutoPlayEnabled}
         seqVariations={playingSound?.type === "SEQ" ? seqVariationsBySound[playingSound.id] : null}
         onPlay={resumeCurrent}
         onPause={pause}
@@ -3542,7 +3540,7 @@ function App() {
         onNext={nextTransportSound}
         onVolume={changeVolume}
         onStrmLoopChange={changeStrmLoop}
-        onStrmAutoPlayChange={changeStrmAutoPlay}
+        onAutoPlayChange={changeSoundListAutoPlay}
         onStrmTrackSelectionChange={changeStrmTrackSelection}
         onSeqVariationChange={(variation) => chooseSeqVariation(playingSound, variation)}
       />
