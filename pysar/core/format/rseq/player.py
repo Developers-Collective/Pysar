@@ -277,6 +277,10 @@ class SequencePlayer:
         # 0 = unlimited (real-time playback), >0 = max iterations for infinite loops
         self._max_loop_iterations: int = 0
 
+        # Set while a command is executing so offline renderers can bind a
+        # performed note back to its semantic BRSEQ source command.
+        self._render_source_offset: int | None = None
+
     @property
     def is_playing(self) -> bool:
         return self._ctx.state == PlayerState.PLAYING
@@ -994,6 +998,7 @@ class SequencePlayer:
             return False
 
         cmd = self._flat_commands[idx]
+        self._render_source_offset = cmd.offset
         track_state.flat_cmd_index = idx + 1
 
         # Handle IF prefix: skip if compare flag is false
@@ -1732,6 +1737,7 @@ class SequencePlayer:
                 'type': 'note_on', 'tick': self._ctx.tick_counter,
                 'track': track, 'note': note, 'velocity': vel,
                 'program': program, 'bank': bank,
+                'source_offset': self._render_source_offset,
             })
 
         def on_note_off(track, note):
@@ -1747,6 +1753,7 @@ class SequencePlayer:
                 'track': track, 'old_note': old_note, 'note': note,
                 'velocity': vel, 'program': program, 'bank': bank,
                 'porta': porta, 'porta_time': porta_time, 'porta_key': porta_key,
+                'source_offset': self._render_source_offset,
             })
 
         def on_control_change(track, cc, value):

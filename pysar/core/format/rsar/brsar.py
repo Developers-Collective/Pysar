@@ -1708,7 +1708,11 @@ class Brsar(EditorBase):
         return sorted(commands, key=lambda command: int(command.offset))
 
     @staticmethod
-    def _seq_alloc_track_mask(brseq, label_name: str | None = None) -> int:
+    def _seq_alloc_track_mask(
+            brseq,
+            label_name: str | None = None,
+            start_offset: int | None = None,
+    ) -> int:
         """Derive the allocation mask for one entry point, never globally.
 
         A shared RSEQ can contain hundreds of independent sounds, each with a
@@ -1718,7 +1722,9 @@ class Brsar(EditorBase):
         from pysar.core.format.rseq.mml import MML
 
         labels = list(brseq.data.labels)
-        if label_name is not None:
+        if start_offset is not None:
+            label = None
+        elif label_name is not None:
             label = next((item for item in labels if item.name == label_name), None)
             if label is None:
                 raise BrsarError(f'Sequence label "{label_name}" was not found')
@@ -1728,7 +1734,11 @@ class Brsar(EditorBase):
                 label = next((item for item in labels if item.name.lower().endswith("_start")), None)
             if label is None:
                 label = min(labels, key=lambda item: int(item.offset), default=None)
-        base_offset = int(label.offset) if label is not None else 0
+        base_offset = (
+            int(start_offset)
+            if start_offset is not None
+            else (int(label.offset) if label is not None else 0)
+        )
         commands = Brsar._seq_physical_commands(brseq)
 
         def allocation_at(command_index: int) -> int | None:
@@ -1927,6 +1937,7 @@ class Brsar(EditorBase):
             brseq_raw: bytes,
             *,
             start_label: str | None = None,
+            start_offset: int | None = None,
             copy_on_write: bool = True,
             group_index: int | None = None,
     ) -> int:
@@ -1956,7 +1967,14 @@ class Brsar(EditorBase):
         old_file_index = int(entry.file_index)
         old_brseq = self.get_seq(old_file_index)
         requested_label = start_label
-        if requested_label is None:
+        requested_offset = None if start_offset is None else int(start_offset)
+        if requested_offset is not None and not self._has_command_offset(
+                replacement, requested_offset,
+        ):
+            raise BrsarError(
+                f"Sequence entry offset 0x{requested_offset:X} was not found"
+            )
+        if requested_label is None and requested_offset is None:
             old_label = self._seq_label_for_effective_offset(
                 old_brseq, int(entry.sound_info.seq_label_offset),
             )
@@ -1964,10 +1982,16 @@ class Brsar(EditorBase):
             if old_label in replacement_labels:
                 requested_label = old_label
 
-        replacement_start_offset = self._seq_effective_label_offset(
-            replacement, requested_label,
+        replacement_start_offset = (
+            requested_offset
+            if requested_offset is not None
+            else self._seq_effective_label_offset(replacement, requested_label)
         )
-        replacement_alloc_track = self._seq_alloc_track_mask(replacement, requested_label)
+        replacement_alloc_track = self._seq_alloc_track_mask(
+            replacement,
+            requested_label,
+            start_offset=requested_offset,
+        )
         track_capacity = int(self._data.arc_common_info.n_seq_tracks)
         if track_capacity > 0 and replacement_alloc_track.bit_count() > track_capacity:
             raise BrsarError(

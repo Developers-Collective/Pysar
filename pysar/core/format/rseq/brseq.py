@@ -58,6 +58,8 @@ class Brseq(EditorBase):
             path: str | Path,
             timebase: int = DEFAULT_TIMEBASE,
             combine_tracks: bool = False,
+            annotations: str = "auto",
+            merge_policy: str = "safe",
     ) -> Self:
         """
         Create a BRSEQ from a MIDI file.
@@ -66,12 +68,22 @@ class Brseq(EditorBase):
             path: Path to MIDI file
             timebase: BRSEQ timebase (default 48)
             combine_tracks: If True, merge all MIDI tracks into one
-
         Returns:
             BrseqEditor instance
         """
-        midi = MidiFile.from_file(path)
-        data = midi_to_brseq(midi, timebase, combine_tracks)
+        if annotations not in {"auto", "ignore"}:
+            raise ValueError("annotations must be 'auto' or 'ignore'")
+        if annotations == "auto":
+            from pysar.core.format.rseq.midi_profile import NintendoMidiProfile
+            data = NintendoMidiProfile.import_file(
+                path,
+                timebase=timebase,
+                combine_tracks=combine_tracks,
+                merge_policy=merge_policy,
+            ).data
+        else:
+            midi = MidiFile.from_file(path)
+            data = midi_to_brseq(midi, timebase, combine_tracks)
         editor = cls(data)
         editor.mark_dirty(DirtyFlags.ALL)
         return editor
@@ -82,10 +94,23 @@ class Brseq(EditorBase):
             midi_bytes: bytes,
             timebase: int = DEFAULT_TIMEBASE,
             combine_tracks: bool = False,
+            annotations: str = "auto",
+            merge_policy: str = "safe",
     ) -> Self:
         """Create a BRSEQ from MIDI bytes."""
         midi = MidiFile.from_bytes(midi_bytes)
-        data = midi_to_brseq(midi, timebase, combine_tracks)
+        if annotations not in {"auto", "ignore"}:
+            raise ValueError("annotations must be 'auto' or 'ignore'")
+        if annotations == "auto":
+            from pysar.core.format.rseq.midi_profile import NintendoMidiProfile
+            data = NintendoMidiProfile.import_midi(
+                midi,
+                timebase=timebase,
+                combine_tracks=combine_tracks,
+                merge_policy=merge_policy,
+            ).data
+        else:
+            data = midi_to_brseq(midi, timebase, combine_tracks)
         editor = cls(data)
         editor.mark_dirty(DirtyFlags.ALL)
         return editor
@@ -190,6 +215,7 @@ class Brseq(EditorBase):
             max_loops: int = 1,
             start_label: str | None = None,
             start_offset: int | None = None,
+            annotated: bool = True,
     ) -> MidiFile:
         """
         Convert to MIDI.
@@ -197,6 +223,8 @@ class Brseq(EditorBase):
         Args:
             path: If provided, save to this file
             ticks_per_beat: MIDI resolution
+            annotated: Include the semantic PNMP/1 command graph, readable MML
+                source, and performance bindings
 
         Returns:
             MidiFile object
@@ -208,6 +236,14 @@ class Brseq(EditorBase):
             start_label=start_label,
             start_offset=start_offset,
         )
+        if annotated:
+            from pysar.core.format.rseq.midi_profile import annotate_midi
+            annotate_midi(
+                midi,
+                self._data,
+                start_label=start_label,
+                start_offset=start_offset,
+            )
         if path:
             midi.save(path)
         return midi
@@ -218,14 +254,15 @@ class Brseq(EditorBase):
             max_loops: int = 1,
             start_label: str | None = None,
             start_offset: int | None = None,
+            annotated: bool = True,
     ) -> bytes:
         """Convert to MIDI bytes."""
-        midi = brseq_to_midi(
-            self._data,
-            ticks_per_beat,
+        midi = self.to_midi(
+            ticks_per_beat=ticks_per_beat,
             max_loops=max_loops,
             start_label=start_label,
             start_offset=start_offset,
+            annotated=annotated,
         )
         return midi.to_bytes()
 

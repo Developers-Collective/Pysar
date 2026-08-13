@@ -1,4 +1,5 @@
 import io
+import re
 import struct
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -7,7 +8,8 @@ from pathlib import Path
 from typing import BinaryIO, Self
 
 from pysar.core.format.rseq.mml import (
-    MML, is_note, DEFAULT_TEMPO, DEFAULT_TIMEBASE,
+    MML, MMLEX, ArgType, MML_ARG_SPEC, MMLEX_ARG_SPEC,
+    is_note, DEFAULT_TEMPO, DEFAULT_TIMEBASE,
 )
 from pysar.core.model.brseq import BrseqData, Label, Track, Command
 
@@ -57,6 +59,8 @@ class MidiCC(IntEnum):
     MOD_SPEED = 21
     SUSTAIN = 64
     PORTAMENTO = 65
+    TRACK_LOOP_START = 89
+    TRACK_LOOP_END = 90
     ALL_SOUND_OFF = 120
     RESET_ALL = 121
     ALL_NOTES_OFF = 123
@@ -68,6 +72,11 @@ class MidiEvent:
     delta_time: int = 0
     status: int = 0
     data: bytes = b""
+    # In-memory export provenance used to create PNMP/1 bindings. These values
+    # are represented by the semantic profile when serialized, not by the
+    # ordinary channel event itself.
+    source_offset: int | None = field(default=None, repr=False, compare=False)
+    source_id: str | None = field(default=None, repr=False, compare=False)
 
     @property
     def event_type(self) -> int:
@@ -111,6 +120,9 @@ class MidiFile:
     format_type: int = 1  # 0 = single track, 1 = multi track, 2 = independent
     ticks_per_beat: int = 480
     tracks: list[MidiTrack] = field(default_factory=list)
+    # Transient first-execution positions used to place readable Nintendo
+    # annotations at meaningful MIDI ticks during export.
+    source_command_ticks: dict[int, int] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
     def from_bytes(cls, data: bytes) -> Self:
@@ -336,7 +348,7 @@ def brseq_to_midi(
         start_label=start_label,
         start_offset=start_offset,
     )
-    events, loop_start_tick, loop_end_tick, timebase = _render_brseq_timeline(
+    events, loop_start_tick, loop_end_tick, timebase, command_ticks = _render_brseq_timeline(
         player,
         brseq,
         max_ticks=5_000_000,
@@ -346,6 +358,9 @@ def brseq_to_midi(
 
     if not events:
         midi = MidiFile(format_type=1, ticks_per_beat=ticks_per_beat)
+        midi.source_command_ticks = {
+            offset: int(tick * tick_scale) for offset, tick in command_ticks.items()
+        }
         midi.tracks.append(_make_empty_track("empty"))
         return midi
 
@@ -368,6 +383,9 @@ def brseq_to_midi(
 
     # Build MIDI file
     midi = MidiFile(format_type=1, ticks_per_beat=ticks_per_beat)
+    midi.source_command_ticks = {
+        offset: int(tick * tick_scale) for offset, tick in command_ticks.items()
+    }
 
     # Track 0: conductor (tempo + loop markers)
     conductor = MidiTrack(name="Conductor")
@@ -448,6 +466,7 @@ def brseq_to_midi(
                 abs_evts.append((midi_tick, MidiEvent(
                     status=MidiEventType.NOTE_ON | channel,
                     data=bytes([ev['note'] & 0x7F, ev['velocity'] & 0x7F]),
+                    source_offset=ev.get('source_offset'),
                 )))
             elif ev['type'] == 'note_off':
                 abs_evts.append((midi_tick, MidiEvent(
@@ -469,6 +488,7 @@ def brseq_to_midi(
                 abs_evts.append((midi_tick, MidiEvent(
                     status=MidiEventType.NOTE_ON | channel,
                     data=bytes([ev['note'] & 0x7F, ev['velocity'] & 0x7F]),
+                    source_offset=ev.get('source_offset'),
                 )))
             elif ev['type'] == 'program_change':
                 prg = ev.get('program', 0) & 0x7F
@@ -545,7 +565,7 @@ def _render_brseq_timeline(
         *,
         max_ticks: int,
         max_loops: int,
-) -> tuple[list[dict], int | None, int | None, int]:
+) -> tuple[list[dict], int | None, int | None, int, dict[int, int]]:
     """Render once while tracing the exact command path used by the player.
 
     Loop labels in a shared RSEQ are only meaningful if the selected cue
@@ -561,6 +581,7 @@ def _render_brseq_timeline(
     first_execution: dict[tuple[int, int], int] = {}
     explicit_loop_starts: dict[int, int] = {}
     loop_candidates: list[tuple[int, int, int]] = []
+    command_ticks: dict[int, int] = {}
     initial_timebase = DEFAULT_TIMEBASE
 
     original_execute = player._execute_next_command
@@ -576,6 +597,7 @@ def _render_brseq_timeline(
         tick = player._ctx.tick_counter
         track_index = track_state.track_index
         offset = cmd.offset
+        command_ticks.setdefault(offset, tick)
         if offset in loop_offsets:
             first_execution.setdefault((track_index, offset), tick)
 
@@ -615,7 +637,7 @@ def _render_brseq_timeline(
         player._execute_next_command = original_execute
 
     if not loop_candidates:
-        return events, None, None, initial_timebase
+        return events, None, None, initial_timebase, command_ticks
 
     # Track zero is the selected conductor.  Fall back to the first executed
     # child loop for sequences whose conductor only opens looping children.
@@ -623,7 +645,7 @@ def _render_brseq_timeline(
         (candidate for candidate in loop_candidates if candidate[0] == 0),
         loop_candidates[0],
     )
-    return events, selected[1], selected[2], initial_timebase
+    return events, selected[1], selected[2], initial_timebase, command_ticks
 
 
 def _find_loop_ticks_from_brseq(
@@ -640,7 +662,7 @@ def _find_loop_ticks_from_brseq(
 
     player = SequencePlayer()
     player.load(brseq, start_label=start_label, start_offset=start_offset)
-    _, start, end, _ = _render_brseq_timeline(
+    _, start, end, _, _ = _render_brseq_timeline(
         player,
         brseq,
         max_ticks=5_000_000,
@@ -686,6 +708,17 @@ class _ChannelEvent:
     type: str   # 'note','program','volume','pan','mod','bend',
                 # 'bendrange','mod_speed','damper','tempo'
     args: list
+    source_order: int = 0
+
+
+@dataclass
+class _EmbeddedAnnotation:
+    """One Nintendo command or label placed on a MIDI timeline."""
+    command: Command | None = None
+    label: str | None = None
+    target_arg: int | None = None
+    target_label: str | None = None
+    source: str = ""
 
 
 @dataclass
@@ -694,6 +727,280 @@ class _PendingNote:
     note: int
     velocity: int
     start_tick: int
+
+
+_PYSAR_TARGETED_RE = re.compile(
+    r"^pysar_(all|(?:0?[0-9]|1[0-5]))\s*:\s*(.+)$",
+    re.IGNORECASE,
+)
+_PYSAR_RE = re.compile(r"^@pysar\s+(.+)$", re.IGNORECASE)
+_PYSAR_CHANNEL_RE = re.compile(
+    r"(?:^|\s+)channel\s*=\s*(\d+)\s*$",
+    re.IGNORECASE,
+)
+
+_PYSAR_COMMAND_ALIASES = {
+    "bend-range": "bend_range",
+    "effect-send-a": "fxsend_a",
+    "effect-send-b": "fxsend_b",
+    "effect-send-c": "fxsend_c",
+    "envelope-reset": "env_reset",
+    "finish": "fin",
+    "initial-pan": "init_pan",
+    "low-pass": "lpf_cutoff",
+    "main-send": "mainsend",
+    "main-volume": "main_volume",
+    "modulation-delay": "mod_delay",
+    "modulation-range": "mod_range",
+    "modulation-type": "mod_type",
+    "portamento-key": "porta",
+    "portamento-time": "porta_time",
+    "priority": "prio",
+    "surround-pan": "surround_pan",
+    "sweep-pitch": "sweep_pitch",
+}
+_PYSAR_TOGGLES = {
+    "tie": "tie",
+    "monophonic": "monophonic",
+    "portamento": "porta_sw",
+}
+
+
+def _midi_meta_text(event: MidiEvent) -> str | None:
+    if (
+            event.status != MidiEventType.META
+            or not event.data
+            or event.data[0] not in (MidiMetaType.TEXT, MidiMetaType.MARKER)
+    ):
+        return None
+    return event.data[1:].decode("utf-8", errors="replace").strip()
+
+
+def _infer_annotation_channel(
+        track_channels: set[int], used_channels: list[int], explicit: int | None,
+        source: str,
+) -> int:
+    if explicit is not None:
+        return explicit
+    if len(track_channels) == 1:
+        return next(iter(track_channels))
+    if not track_channels and used_channels:
+        return used_channels[0]
+    if len(track_channels) > 1:
+        raise ValueError(
+            f"Ambiguous MIDI annotation '{source}': its MIDI track uses "
+            "multiple channels; add channel=1..16"
+        )
+    return 0
+
+
+def _expand_pysar_alias(body: str) -> str:
+    """Translate a friendly composer marker to the normal RSEQ spelling."""
+    parts = body.strip().split(None, 1)
+    if not parts:
+        raise ValueError("Empty @pysar annotation")
+    name = parts[0].lower()
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if name in (
+            "function", "function-end", "label", "call", "jump",
+            "return", "ret", "open-track", "open_track",
+    ):
+        raise ValueError(
+            "@pysar does not expose manual function/control-flow regions; "
+            "write repeated music normally and let PySAR extract reusable "
+            "phrases (advanced commands can use pysar_NN:)"
+        )
+    if name in _PYSAR_TOGGLES:
+        enabled = rest.lower()
+        if enabled not in ("on", "off"):
+            raise ValueError(f"@pysar {name} requires 'on' or 'off'")
+        return f"{_PYSAR_TOGGLES[name]}_{enabled}"
+
+    command_name = _PYSAR_COMMAND_ALIASES.get(name, name.replace("-", "_"))
+    return f"{command_name} {rest}".strip()
+
+
+def _parse_embedded_annotation(payload: str, source: str) -> _EmbeddedAnnotation:
+    """Parse one targeted command line or friendly alias."""
+    from pysar.core.format.rseq.text import _parse_command
+
+    line = payload.strip()
+    if not line:
+        raise ValueError(f"Empty PySAR MIDI annotation in '{source}'")
+    if line.endswith(":"):
+        label = line[:-1].strip()
+        if not label or any(char.isspace() for char in label):
+            raise ValueError(f"Invalid label in MIDI annotation '{source}'")
+        return _EmbeddedAnnotation(label=label, source=source)
+
+    parts = line.split(None, 1)
+    command_name = parts[0].lower().replace("-", "_")
+    target_arg: int | None = None
+    target_label: str | None = None
+    parse_line = line
+    if command_name in ("call", "jump"):
+        if len(parts) != 2 or not parts[1].strip():
+            raise ValueError(f"{command_name} requires a label in '{source}'")
+        target_arg = 0
+        target_label = parts[1].strip().removeprefix("::")
+    elif command_name in ("open_track", "opentrack"):
+        if len(parts) != 2 or "," not in parts[1]:
+            raise ValueError(f"open_track requires track, label in '{source}'")
+        _, target = parts[1].split(",", 1)
+        target_arg = 1
+        target_label = target.strip().removeprefix("::")
+
+    try:
+        command = _parse_command(
+            parse_line,
+            {},
+            1,
+            allow_unresolved=target_label is not None,
+        )
+    except ValueError as exc:
+        raise ValueError(f"Invalid PySAR MIDI annotation '{source}': {exc}") from exc
+    _validate_embedded_command_ranges(command, source)
+    return _EmbeddedAnnotation(
+        command=command,
+        target_arg=target_arg,
+        target_label=target_label,
+        source=source,
+    )
+
+
+def _validate_embedded_command_ranges(command: Command, source: str) -> None:
+    """Fail instead of letting the binary writer wrap an annotation value."""
+    command_type = command.get_mml()
+    if isinstance(command_type, MML):
+        spec = MML_ARG_SPEC.get(command_type, ())
+    elif isinstance(command_type, MMLEX):
+        spec = MMLEX_ARG_SPEC.get(command_type, ())
+    else:
+        return
+
+    ranges = {
+        ArgType.U8: (0, 0xFF),
+        ArgType.S8: (-0x80, 0x7F),
+        ArgType.U16: (0, 0xFFFF),
+        ArgType.S16: (-0x8000, 0x7FFF),
+        ArgType.U24: (0, 0xFFFFFF),
+        ArgType.VAR_LEN: (0, 0x0FFFFFFF),
+    }
+    for index, (value, arg_type) in enumerate(zip(command.args, spec), 1):
+        limits = ranges.get(arg_type)
+        if limits is not None and not limits[0] <= int(value) <= limits[1]:
+            raise ValueError(
+                f"Invalid PySAR MIDI annotation '{source}': argument {index} "
+                f"is outside {limits[0]}..{limits[1]}"
+            )
+
+    prefix_ranges = {
+        MML.RANDOM: (-0x8000, 0x7FFF),
+        MML.TIME_RANDOM: (-0x8000, 0x7FFF),
+        MML.TIME: (-0x8000, 0x7FFF),
+        MML.VARIABLE: (0, 0xFF),
+        MML.TIME_VARIABLE: (0, 0xFF),
+    }
+    for prefix in command.prefixes:
+        limits = prefix_ranges.get(prefix.type)
+        if limits is None:
+            continue
+        if any(not limits[0] <= int(value) <= limits[1] for value in prefix.args):
+            raise ValueError(
+                f"Invalid PySAR MIDI annotation '{source}': prefix value "
+                f"is outside {limits[0]}..{limits[1]}"
+            )
+
+
+def _collect_embedded_annotations(
+        midi: MidiFile,
+        used_channels: list[int],
+        tick_scale: float,
+        combine_tracks: bool,
+) -> dict[int, list[_ChannelEvent]]:
+    """Collect PySAR's targeted command syntax and friendly aliases."""
+    collected: dict[int, list[_ChannelEvent]] = {channel: [] for channel in used_channels}
+    order = 0
+
+    for midi_track_index, track in enumerate(midi.tracks):
+        track_channels = {
+            event.channel
+            for event in track.events
+            if event.event_type in (
+                MidiEventType.NOTE_ON, MidiEventType.NOTE_OFF,
+                MidiEventType.CONTROL_CHANGE, MidiEventType.PROGRAM_CHANGE,
+                MidiEventType.PITCH_BEND,
+            )
+        }
+        absolute_tick = 0
+        for event in track.events:
+            absolute_tick += event.delta_time
+            text = _midi_meta_text(event)
+            if text is None or text.lower().startswith("@pysar/1 "):
+                continue
+
+            targeted = _PYSAR_TARGETED_RE.match(text)
+            alias = _PYSAR_RE.match(text)
+            if not targeted and not alias:
+                if text.lower() == "@pysar":
+                    raise ValueError("Empty @pysar MIDI annotation")
+                if text.lower().startswith("pysar_") and ":" in text:
+                    raise ValueError(
+                        f"Invalid PySAR MIDI annotation target in '{text}'; "
+                        "use pysar_00 through pysar_15 or pysar_all"
+                    )
+                continue
+
+            target_channels: list[int]
+            payload: str
+            if targeted:
+                target = targeted.group(1).lower()
+                payload = targeted.group(2).strip()
+                target_channels = (
+                    list(used_channels)
+                    if target == "all"
+                    else [int(target)]
+                )
+            else:
+                payload = alias.group(1).strip()
+                channel_match = _PYSAR_CHANNEL_RE.search(payload)
+                explicit_channel = None
+                if channel_match:
+                    requested_channel = int(channel_match.group(1))
+                    if not 1 <= requested_channel <= 16:
+                        raise ValueError(
+                            f"Invalid MIDI annotation '{text}': channel must be 1..16"
+                        )
+                    explicit_channel = requested_channel - 1
+                    payload = payload[:channel_match.start()].strip()
+                target_channels = [_infer_annotation_channel(
+                    track_channels, used_channels, explicit_channel, text,
+                )]
+                payload = _expand_pysar_alias(payload)
+
+            if combine_tracks:
+                target_channels = [0]
+
+            for channel in target_channels:
+                if not combine_tracks and channel not in used_channels:
+                    # pysar_all emits nothing for an unused track. An explicit
+                    # unused pysar_NN is likewise a
+                    # no-op instead of manufacturing an empty sequence track.
+                    continue
+                expanded = re.sub(
+                    r"\$([A-Za-z_][A-Za-z0-9_]*)",
+                    lambda match: f"Track_{channel}_{match.group(1)}",
+                    payload,
+                )
+                annotation = _parse_embedded_annotation(expanded, text)
+                tick = max(0, int(absolute_tick * tick_scale + 0.5))
+                collected.setdefault(channel, []).append(
+                    _ChannelEvent(tick, "embedded", [annotation], order)
+                )
+                order += 1
+
+    return collected
 
 
 def midi_to_brseq(
@@ -707,7 +1014,7 @@ def midi_to_brseq(
     Produces an smfconv-compatible RSEQ structure:
 
     * ``notewait_off`` mode (explicit WAITs advance time)
-    * Loop markers from ``[`` / ``]`` MIDI marker meta-events
+    * Loop markers from ``[`` / ``]``
     * Per-channel tracks with setup preambles
     * Subroutine extraction (CALL / RET) for repeated phrases
     * Conductor track with ``alloctrack`` and ``opentrack``
@@ -719,16 +1026,32 @@ def midi_to_brseq(
     # Loop markers
     loop_start_midi: int | None = None
     loop_end_midi: int | None = None
+    loop_start_count = 0
+    loop_end_count = 0
     for track in midi.tracks:
         abs_tick = 0
         for event in track.events:
             abs_tick += event.delta_time
             if event.status == 0xFF and event.data and event.data[0] == MidiMetaType.MARKER:
                 text = event.data[1:].decode("latin-1", errors="replace").strip()
-                if text == "[":
+                if text.lower() in ("[", "loop_start"):
                     loop_start_midi = abs_tick
-                elif text == "]":
+                    loop_start_count += 1
+                elif text.lower() in ("]", "loop_end"):
                     loop_end_midi = abs_tick
+
+                    loop_end_count += 1
+
+    if loop_start_count != loop_end_count:
+        raise ValueError("Whole-sequence MIDI loop needs one start and one end marker")
+    if loop_start_count > 1:
+        raise ValueError("Only one whole-sequence MIDI loop marker pair is supported")
+    if (
+            loop_start_midi is not None
+            and loop_end_midi is not None
+            and loop_end_midi <= loop_start_midi
+    ):
+        raise ValueError("Whole-sequence MIDI loop end must follow its start")
 
     has_loop = loop_start_midi is not None and loop_end_midi is not None
 
@@ -778,6 +1101,13 @@ def midi_to_brseq(
         merged.sort(key=lambda x: x[0])
         channel_events = {0: merged}
 
+    embedded_events = _collect_embedded_annotations(
+        midi,
+        sorted(channel_events.keys()),
+        tick_scale,
+        combine_tracks,
+    )
+
     # 3. Channel-to-track index mapping.  MIDI and NW4R both expose sixteen
     # channels/tracks; keep this bijective (the previous special case mapped
     # both MIDI channels 8 and 9 to BRSEQ track 9).
@@ -795,6 +1125,7 @@ def midi_to_brseq(
     all_tracks: dict[str, Track] = {}
     all_labels: list[Label] = []
     label_refs: list[tuple[str, int, int, str]] = []
+    extra_label_positions: list[tuple[str, int, str]] = []
 
     # Conductor preamble: alloctrack + opentrack for each child
     track_mask = 0
@@ -821,6 +1152,7 @@ def midi_to_brseq(
 
         _build_channel_tracks(
             track_idx=tidx, events=evts,
+            embedded_events=embedded_events.get(ch, ()),
             tick_scale=tick_scale, tempo=tempo,
             tempo_changes=tempo_changes if is_cond else (),
             loop_start_midi=loop_start_midi, loop_end_midi=loop_end_midi,
@@ -828,6 +1160,7 @@ def midi_to_brseq(
             conductor_preamble=conductor_preamble if is_cond else None,
             all_tracks=all_tracks, all_labels=all_labels,
             label_refs=label_refs,
+            extra_label_positions=extra_label_positions,
         )
 
         # Register OPEN_TRACK label_refs under the conductor track name
@@ -836,7 +1169,12 @@ def midi_to_brseq(
                 label_refs.append(("main", cmd_idx, 1, target))
 
     # 5. Resolve label offsets
-    command_stream = _resolve_label_offsets(all_tracks, all_labels, label_refs)
+    command_stream = _resolve_label_offsets(
+        all_tracks,
+        all_labels,
+        label_refs,
+        extra_label_positions,
+    )
 
     return BrseqData(
         version=0x0100,
@@ -849,10 +1187,10 @@ def midi_to_brseq(
 # Channel conversion
 
 def _build_channel_tracks(
-    *, track_idx, events, tick_scale, tempo, tempo_changes,
+    *, track_idx, events, embedded_events, tick_scale, tempo, tempo_changes,
     loop_start_midi, loop_end_midi,
     is_conductor, conductor_preamble,
-    all_tracks, all_labels, label_refs,
+    all_tracks, all_labels, label_refs, extra_label_positions,
 ):
     """Build Track objects for a single MIDI channel.
 
@@ -864,6 +1202,7 @@ def _build_channel_tracks(
 
     # Pair note-on/off events and convert CC/pitchbend into intermediate events.
     output = _collect_channel_events(events, tick_scale)
+    output.extend(embedded_events)
     for midi_tick, bpm in tempo_changes:
         output.append(_ChannelEvent(
             max(0, int(midi_tick * tick_scale + 0.5)),
@@ -872,8 +1211,10 @@ def _build_channel_tracks(
         ))
     output.sort(key=lambda event: (
         event.brseq_tick,
-        0 if event.type == 'tempo' else 1,
+        0 if event.type == 'tempo' else (1 if event.type == 'embedded' else 2),
+        event.source_order,
     ))
+    _validate_track_loop_events(output, track_idx)
 
     # Initial setup from events before the loop, or at tick 0.
 
@@ -882,7 +1223,7 @@ def _build_channel_tracks(
     for ev in output:
         if ev.brseq_tick > cutoff:
             break
-        if ev.type not in init:
+        if ev.type != 'embedded' and ev.type not in init:
             init[ev.type] = ev.args
 
     setup: list[Command] = [Command(opcode=MML.NOTE_WAIT, args=[0])]
@@ -923,7 +1264,11 @@ def _build_channel_tracks(
 
     # Filter out redundant setup events at tick 0 (already in preamble)
     def _redundant(e: _ChannelEvent) -> bool:
-        if e.brseq_tick != 0 or e.type == 'note':
+        setup_types = {
+            'program', 'volume', 'pan', 'bendrange', 'bend',
+            'mod_speed', 'mod', 'tempo',
+        }
+        if e.brseq_tick != 0 or e.type not in setup_types:
             return False
         return e.type in init and e.args == init[e.type]
 
@@ -932,8 +1277,11 @@ def _build_channel_tracks(
 
     # Convert events to commands
 
-    intro_cmds = _events_to_commands(intro_evts, initial_prg) if intro_evts else []
-    loop_cmds = _events_to_commands(loop_evts, initial_prg)
+    intro_cmds, intro_labels, intro_refs = (
+        _events_to_commands(intro_evts, initial_prg)
+        if intro_evts else ([], [], [])
+    )
+    loop_cmds, loop_labels, loop_refs = _events_to_commands(loop_evts, initial_prg)
 
     # The marker positions define segment lengths even when their tails are
     # silent.  Without these waits, a 480/960 MIDI loop with its last event at
@@ -947,7 +1295,26 @@ def _build_channel_tracks(
     # Extract repeated subroutines
 
     subroutines: dict[str, list[Command]] = {}
-    loop_cmds, sub_refs = _extract_subroutines(loop_cmds, f"Track_{track_idx}", subroutines)
+    structural_opcodes = {
+        MML.OPEN_TRACK, MML.JUMP, MML.CALL, MML.LOOP_START,
+        MML.LOOP_END, MML.RET, MML.FIN,
+    }
+    has_embedded_structure = bool(intro_labels or intro_refs or loop_labels or loop_refs)
+    has_embedded_structure = has_embedded_structure or any(
+        event.type in ('track_loop_start', 'track_loop_end')
+        or (
+            event.type == 'embedded'
+            and event.args[0].command is not None
+            and event.args[0].command.get_mml() in structural_opcodes
+        )
+        for event in loop_evts
+    )
+    if has_embedded_structure:
+        sub_refs = []
+    else:
+        loop_cmds, sub_refs = _extract_subroutines(
+            loop_cmds, f"Track_{track_idx}", subroutines,
+        )
 
     # Assemble Track objects
 
@@ -964,6 +1331,13 @@ def _build_channel_tracks(
     all_tracks[tname] = setup_track
     all_labels.append(Label(name=tname, offset=0))
 
+    intro_prefix = len(preamble) + len(setup)
+    for cmd_index, label_name in intro_labels:
+        extra_label_positions.append((tname, intro_prefix + cmd_index, label_name))
+        all_labels.append(Label(name=label_name, offset=0))
+    for cmd_index, arg_index, target in intro_refs:
+        label_refs.append((tname, intro_prefix + cmd_index, arg_index, target))
+
     if has_loop:
         loop_label = f"{tname}_LoopStart"
         jump = Command(opcode=MML.JUMP, args=[0])
@@ -975,13 +1349,25 @@ def _build_channel_tracks(
         all_labels.append(Label(name=loop_label, offset=0))
         label_refs.append((loop_label, len(loop_track.commands) - 1, 0, loop_label))
 
+        for cmd_index, label_name in loop_labels:
+            extra_label_positions.append((loop_label, cmd_index, label_name))
+            all_labels.append(Label(name=label_name, offset=0))
+        for cmd_index, arg_index, target in loop_refs:
+            label_refs.append((loop_label, cmd_index, arg_index, target))
+
         for cmd_index, sub_target in sub_refs:
             label_refs.append((loop_label, cmd_index, 0, sub_target))
     else:
+        loop_prefix = len(preamble) + len(setup) + len(intro_cmds)
         setup_track.commands.extend(loop_cmds)
         setup_track.commands.append(Command(opcode=MML.FIN))
+        for cmd_index, label_name in loop_labels:
+            extra_label_positions.append((tname, loop_prefix + cmd_index, label_name))
+            all_labels.append(Label(name=label_name, offset=0))
+        for cmd_index, arg_index, target in loop_refs:
+            label_refs.append((tname, loop_prefix + cmd_index, arg_index, target))
         for cmd_index, sub_target in sub_refs:
-            actual_idx = len(preamble) + len(setup) + len(intro_cmds) + cmd_index
+            actual_idx = loop_prefix + cmd_index
             label_refs.append((tname, actual_idx, 0, sub_target))
 
     # Subroutine tracks
@@ -1001,6 +1387,38 @@ def _build_channel_tracks(
         )
         all_tracks[sname] = sub_track
         all_labels.append(Label(name=sname, offset=0))
+
+
+def _validate_track_loop_events(events: list[_ChannelEvent], track_idx: int) -> None:
+    """Reject mismatched counted-loop annotations before serialization."""
+    depth = 0
+    for event in events:
+        is_start = event.type == 'track_loop_start'
+        is_end = event.type == 'track_loop_end'
+        if event.type == 'embedded':
+            annotation: _EmbeddedAnnotation = event.args[0]
+            if annotation.command is not None:
+                mml = annotation.command.get_mml()
+                is_start = mml == MML.LOOP_START
+                is_end = mml == MML.LOOP_END
+        if is_start:
+            depth += 1
+            if depth > 3:
+                raise ValueError(
+                    f"PySAR MIDI track {track_idx} exceeds NW4R's "
+                    "three-entry loop/call stack"
+                )
+        elif is_end:
+            if depth == 0:
+                raise ValueError(
+                    f"PySAR MIDI track {track_idx} has loop_end without loop_start"
+                )
+            depth -= 1
+    if depth:
+        raise ValueError(
+            f"PySAR MIDI track {track_idx} has {depth} unclosed loop_start "
+            f"annotation{'s' if depth != 1 else ''}"
+        )
 
 
 def _pad_commands_to_segment_end(
@@ -1051,6 +1469,8 @@ def _collect_channel_events(
                 MidiCC.VOLUME: 'volume', MidiCC.PAN: 'pan',
                 MidiCC.MOD_WHEEL: 'mod', MidiCC.BEND_RANGE: 'bendrange',
                 MidiCC.MOD_SPEED: 'mod_speed', MidiCC.SUSTAIN: 'damper',
+                MidiCC.TRACK_LOOP_START: 'track_loop_start',
+                MidiCC.TRACK_LOOP_END: 'track_loop_end',
             }
             if cc in mapping:
                 v = (1 if val >= 64 else 0) if cc == MidiCC.SUSTAIN else val
@@ -1069,16 +1489,24 @@ def _collect_channel_events(
                                      [p.note, p.velocity, max(1, ft - p.start_tick)]))
 
     order = {'program': 0, 'volume': 1, 'pan': 2, 'bendrange': 3,
-             'mod_speed': 4, 'mod': 5, 'bend': 6, 'damper': 7, 'tempo': 8, 'note': 9}
+             'mod_speed': 4, 'mod': 5, 'bend': 6, 'damper': 7,
+             'track_loop_start': 8, 'track_loop_end': 9,
+             'tempo': 10, 'note': 11}
     out.sort(key=lambda e: (e.brseq_tick, order.get(e.type, 99)))
     return out
 
 
 def _events_to_commands(
     events: list[_ChannelEvent], initial_prg: int | None,
-) -> list[Command]:
+) -> tuple[
+    list[Command],
+    list[tuple[int, str]],
+    list[tuple[int, int, str]],
+]:
     """Convert intermediate events to BRSEQ commands (notewait_off mode)."""
     cmds: list[Command] = []
+    labels: list[tuple[int, str]] = []
+    refs: list[tuple[int, int, str]] = []
     cur_tick = 0
     cur_prg = initial_prg
 
@@ -1112,8 +1540,27 @@ def _events_to_commands(
             cmds.append(Command(opcode=MML.PITCH_BEND, args=[ev.args[0]]))
         elif ev.type == 'tempo':
             cmds.append(Command(opcode=MML.TEMPO, args=[ev.args[0]]))
+        elif ev.type == 'track_loop_start':
+            cmds.append(Command(opcode=MML.LOOP_START, args=[ev.args[0] & 0x7F]))
+        elif ev.type == 'track_loop_end':
+            cmds.append(Command(opcode=MML.LOOP_END))
+        elif ev.type == 'embedded':
+            annotation: _EmbeddedAnnotation = ev.args[0]
+            if annotation.label is not None:
+                labels.append((len(cmds), annotation.label))
+            elif annotation.command is not None:
+                cmds.append(annotation.command)
+                if (
+                        annotation.target_arg is not None
+                        and annotation.target_label is not None
+                ):
+                    refs.append((
+                        len(cmds) - 1,
+                        annotation.target_arg,
+                        annotation.target_label,
+                    ))
 
-    return cmds
+    return cmds, labels, refs
 
 
 # Subroutine extraction
@@ -1297,6 +1744,7 @@ def _resolve_label_offsets(
     all_tracks: dict[str, Track],
     all_labels: list[Label],
     label_refs: list[tuple[str, int, int, str]],
+    extra_label_positions: list[tuple[str, int, str]] | None = None,
 ) -> list[Command]:
     """
     Resolve label offsets by doing a real serialization pass through the
@@ -1311,6 +1759,12 @@ def _resolve_label_offsets(
     from pysar.core.format.rseq.writer import BrseqWriter
 
     writer = BrseqWriter()
+    extra_label_positions = extra_label_positions or []
+
+    label_names = [label.name for label in all_labels]
+    duplicates = sorted({name for name in label_names if label_names.count(name) > 1})
+    if duplicates:
+        raise ValueError(f"Duplicate PySAR MIDI label(s): {', '.join(duplicates)}")
 
     # Pass 1: serialize with placeholder arguments.
     # Build a temporary BrseqData just for this serialization.
@@ -1340,10 +1794,23 @@ def _resolve_label_offsets(
             if track.label is not None:
                 track.label.offset = label_to_offset[name]
 
+    # Labels embedded in MIDI can sit in the middle of a generated track.
+    # Resolve them against the exact command byte offsets from the writer's
+    # first pass, without forcing the composer to know a numeric address.
+    for track_name, cmd_idx, label_name in extra_label_positions:
+        track = all_tracks.get(track_name)
+        if track is None or not 0 <= cmd_idx < len(track.commands):
+            raise ValueError(
+                f"PySAR MIDI label '{label_name}' has no command at its position"
+            )
+        label_to_offset[label_name] = track.commands[cmd_idx].offset
+
     # Patch JUMP, CALL, and OPEN_TRACK arguments with real offsets.
     for track_name, cmd_idx, arg_idx, target in label_refs:
         trk = all_tracks.get(track_name)
-        if trk and cmd_idx < len(trk.commands) and target in label_to_offset:
+        if target not in label_to_offset:
+            raise ValueError(f"PySAR MIDI command refers to undefined label '{target}'")
+        if trk and cmd_idx < len(trk.commands):
             trk.commands[cmd_idx].args[arg_idx] = label_to_offset[target]
 
     # Update Label objects used by the LABL block.

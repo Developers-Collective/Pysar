@@ -952,7 +952,10 @@ function ReplaceSoundDialog({ soundId, onClose, onDirtyChange, onDataRefresh, on
       const result = await window.pysar.call("choose_sequence_source");
       if (result?.ok && result.path) {
         setSeqReplacement(result);
-        setSeqReplacementLabel(result.labels?.[0]?.name || "");
+        const hasAnnotatedOffset = result.annotated && result.entryOffset != null;
+        setSeqReplacementLabel(
+          result.entryLabel || (hasAnnotatedOffset ? "" : (result.labels?.[0]?.name || "")),
+        );
       } else if (result?.error && result.error !== "Cancelled") {
         setError(result.error);
       }
@@ -976,6 +979,7 @@ function ReplaceSoundDialog({ soundId, onClose, onDirtyChange, onDataRefresh, on
         soundId,
         seqReplacement.path,
         seqReplacementLabel || null,
+        seqReplacementLabel ? null : (seqReplacement.entryOffset ?? null),
       );
       if (!result?.ok) { setError(result?.error || "Sequence replacement failed"); return; }
       onPlaybackInvalidate?.(soundId);
@@ -1105,6 +1109,9 @@ function ReplaceSoundDialog({ soundId, onClose, onDirtyChange, onDataRefresh, on
                   <div className="dialog-field">
                     <label>Start label</label>
                     <select value={seqReplacementLabel} onChange={(event) => setSeqReplacementLabel(event.target.value)}>
+                      {seqReplacement.annotated && seqReplacement.entryOffset != null && !seqReplacement.entryLabel && (
+                        <option value="">Annotated entry · 0x{Number(seqReplacement.entryOffset).toString(16).toUpperCase()}</option>
+                      )}
                       {seqReplacement.labels.map((label, index) => <option key={`${label.name}-${index}`} value={label.name}>{label.name}</option>)}
                     </select>
                   </div>

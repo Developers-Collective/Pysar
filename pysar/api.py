@@ -5517,15 +5517,43 @@ class PysarApi:
     @staticmethod
     def _midi_source_info(path: str) -> dict:
         """Inspect MIDI metadata without running the expensive BRSEQ compiler."""
+        from pysar.core.format.rseq import Brseq, NintendoMidiProfile
         from pysar.core.format.rseq.midi import (
             MidiEventType,
             MidiFile,
             MidiMetaType,
         )
         from pysar.core.format.rseq.mml import DEFAULT_TEMPO, DEFAULT_TIMEBASE
+        from pysar.core.format.rsar import Brsar
 
         source = Path(str(path)).expanduser()
         midi = MidiFile.from_file(source)
+        profile = NintendoMidiProfile.from_midi(midi)
+        if profile is not None:
+            imported = NintendoMidiProfile.import_midi(midi, profile=profile)
+            brseq = imported.brseq
+            return {
+                "path": str(source),
+                "name": source.name,
+                "format": "MIDI",
+                "annotated": True,
+                "profile": "pysar.nw4r-midi/1",
+                "entryLabel": imported.entry_label,
+                "entryOffset": imported.entry_offset,
+                "tracks": int(brseq.n_tracks),
+                "midiTracks": len(midi.tracks),
+                "tempo": int(brseq.tempo),
+                "timebase": int(brseq.timebase),
+                "labels": [
+                    {
+                        "name": label.name,
+                        "offset": int(label.offset),
+                        "startOffset": int(Brsar._seq_effective_label_offset(brseq, label.name)),
+                    }
+                    for label in brseq.labels
+                ],
+            }
+
         channels: set[int] = set()
         tempo_at_zero = DEFAULT_TEMPO
         channel_events = {
@@ -5558,6 +5586,7 @@ class PysarApi:
             "path": str(source),
             "name": source.name,
             "format": "MIDI",
+            "annotated": False,
             "tracks": max(1, len(channels)),
             "midiTracks": len(midi.tracks),
             "tempo": int(tempo_at_zero),
@@ -5736,13 +5765,24 @@ class PysarApi:
             sound_id: int,
             source_path: str,
             start_label: str | None = None,
+            start_offset: int | None = None,
     ) -> dict:
         try:
             raw, source_format = self._load_sequence_source(str(source_path))
+            if (
+                    start_label is None
+                    and start_offset is None
+                    and Path(str(source_path)).suffix.lower() in {".mid", ".midi"}
+            ):
+                from pysar.core.format.rseq import NintendoMidiAnnotations
+                annotated = NintendoMidiAnnotations.import_file(source_path)
+                start_label = annotated.entry_label
+                start_offset = annotated.entry_offset
             return self._replace_sequence_bytes(
                 int(sound_id),
                 raw,
                 start_label=start_label,
+                start_offset=start_offset,
                 source_format=source_format,
             )
         except Exception as exc:
@@ -5752,7 +5792,12 @@ class PysarApi:
         chosen = self.choose_sequence_source()
         if not chosen.get("ok"):
             return chosen
-        return self.replace_sequence_from_path(int(sound_id), str(chosen["path"]))
+        return self.replace_sequence_from_path(
+            int(sound_id),
+            str(chosen["path"]),
+            chosen.get("entryLabel"),
+            chosen.get("entryOffset"),
+        )
 
     def _replace_sequence_bytes(
             self,
@@ -5760,6 +5805,7 @@ class PysarApi:
             raw: bytes,
             *,
             start_label: str | None = None,
+            start_offset: int | None = None,
             source_format: str = "BRSEQ",
     ) -> dict:
         archive = self.project_service.require_archive(self.session)
@@ -5775,6 +5821,7 @@ class PysarApi:
             int(sound_id),
             bytes(raw),
             start_label=start_label,
+            start_offset=start_offset,
             copy_on_write=True,
         )
         self.project_service.mark_dirty(self.session)
