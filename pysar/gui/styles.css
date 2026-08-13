@@ -666,6 +666,16 @@ body.resizing-column * {
 .tbl thead th .sort-arrow { color: var(--accent); }
 
 .tbl tbody tr { height: var(--row-h); cursor: pointer; }
+.tbl tbody tr.virtual-table-spacer {
+  height: auto;
+  cursor: default;
+  pointer-events: none;
+}
+.tbl tbody tr.virtual-table-spacer:hover { background: transparent; }
+.tbl tbody tr.virtual-table-spacer td {
+  padding: 0;
+  border: 0;
+}
 .tbl tbody tr:has(.linked-banks-table-list.is-expanded),
 .tbl tbody tr:has(.reference-table-list.is-expanded) { height: auto; }
 .tbl tbody tr:has(td.linked-banks-cell) td,
@@ -1856,6 +1866,25 @@ body.resizing-column * {
 .seq-track-section.root .seq-track-section-header {
   box-shadow: inset 3px 0 0 var(--accent);
 }
+.seq-code-virtual { padding: 0; }
+.seq-code-virtual .seq-track-section-header {
+  position: relative;
+  top: auto;
+  height: 32px;
+  min-height: 32px;
+}
+.seq-code-virtual .seq-track-section-header.root {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.seq-code-virtual .seq-line {
+  height: 20px;
+  line-height: 20px;
+}
+.seq-code-section-gap {
+  height: 9px;
+  border-top: 1px solid var(--border);
+}
+.seq-code-spacer { width: 1px; pointer-events: none; }
 .seq-keyboard {
   flex: 0 0 auto;
   height: 84px;

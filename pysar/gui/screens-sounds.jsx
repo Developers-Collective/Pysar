@@ -33,21 +33,8 @@ function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, on
   const trimmedQuery = (query || "").trim().toLowerCase();
   const columnSizing = useResizableTableColumns(SOUND_TABLE_COLUMNS);
 
-  // Scroll the selected row into view whenever the selection changes — so
-  // jumping in from the file inspector's "Used by" list lands the user on
-  // the right row rather than just highlighting it off-screen.
   const tableWrapRef = React.useRef(null);
-  React.useEffect(() => {
-    if (openId == null || !tableWrapRef.current) return;
-    const frame = window.requestAnimationFrame(() => {
-      const row = Array.from(tableWrapRef.current?.querySelectorAll("tr[data-sound-id]") || [])
-        .find((candidate) => candidate.getAttribute("data-sound-id") === String(openId));
-      if (!row) return;
-      row.scrollIntoView?.({ block: "center", behavior: "smooth" });
-      try { row.focus?.({ preventScroll: true }); } catch (_) { row.focus?.(); }
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [openId]);
+  const [tableViewport, setTableViewport] = useStateS({ scrollTop: 0, height: 600, rowHeight: 28 });
 
   const rows = useMemoS(() => {
     let r = D.sounds;
@@ -65,6 +52,60 @@ function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, on
     });
     return r;
   }, [D, filter, sortBy, sortDir, trimmedQuery]);
+
+  const virtualizeRows = rows.length > 200;
+  const tableHeaderHeight = 30;
+  const overscanRows = 12;
+  const firstVisibleRow = virtualizeRows
+    ? Math.max(0, Math.floor((tableViewport.scrollTop - tableHeaderHeight) / tableViewport.rowHeight) - overscanRows)
+    : 0;
+  const lastVisibleRow = virtualizeRows
+    ? Math.min(
+      rows.length,
+      Math.ceil((tableViewport.scrollTop + tableViewport.height - tableHeaderHeight) / tableViewport.rowHeight) + overscanRows,
+    )
+    : rows.length;
+  const renderedRows = rows.slice(firstVisibleRow, lastVisibleRow);
+  const topSpacerHeight = firstVisibleRow * tableViewport.rowHeight;
+  const bottomSpacerHeight = Math.max(0, (rows.length - lastVisibleRow) * tableViewport.rowHeight);
+
+  const updateTableViewport = React.useCallback(() => {
+    const element = tableWrapRef.current;
+    if (!element) return;
+    const rowHeight = parseFloat(window.getComputedStyle(element).getPropertyValue("--row-h")) || 28;
+    setTableViewport((current) => {
+      const next = { scrollTop: element.scrollTop, height: element.clientHeight, rowHeight };
+      return current.scrollTop === next.scrollTop && current.height === next.height && current.rowHeight === next.rowHeight
+        ? current
+        : next;
+    });
+  }, []);
+
+  React.useEffect(() => {
+    updateTableViewport();
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(updateTableViewport) : null;
+    if (tableWrapRef.current) observer?.observe(tableWrapRef.current);
+    return () => observer?.disconnect();
+  }, [updateTableViewport]);
+
+  // Resolve selection positions from data instead of walking every DOM row.
+  React.useEffect(() => {
+    if (openId == null || !tableWrapRef.current) return undefined;
+    const index = rows.findIndex((sound) => Number(sound.id) === Number(openId));
+    if (index < 0) return undefined;
+    const element = tableWrapRef.current;
+    const rowTop = tableHeaderHeight + index * tableViewport.rowHeight;
+    const rowBottom = rowTop + tableViewport.rowHeight;
+    if (rowTop < element.scrollTop || rowBottom > element.scrollTop + element.clientHeight) {
+      element.scrollTop = Math.max(0, rowTop - element.clientHeight / 2 + tableViewport.rowHeight / 2);
+      updateTableViewport();
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const row = element.querySelector(`tr[data-sound-id="${openId}"]`);
+      try { row?.focus?.({ preventScroll: true }); } catch (_) { row?.focus?.(); }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [openId, rows, tableViewport.rowHeight, updateTableViewport]);
 
   useEffectS(() => {
     onVisibleSoundsChange?.(rows.map((sound) => sound.id));
@@ -136,7 +177,7 @@ function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, on
         </div>
       </div>
 
-      <div className="table-wrap" ref={tableWrapRef}>
+      <div className="table-wrap" ref={tableWrapRef} onScroll={updateTableViewport}>
         <table className="tbl sounds-table" ref={columnSizing.tableRef} style={columnSizing.tableStyle}>
           <ResizableTableColGroup columns={SOUND_TABLE_COLUMNS} sizing={columnSizing} />
           <thead>
@@ -162,7 +203,13 @@ function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, on
                   </div>
                 </td>
               </tr>
-            ) : rows.map((s) => {
+            ) : <>
+              {topSpacerHeight > 0 && (
+                <tr className="virtual-table-spacer" aria-hidden="true">
+                  <td colSpan={visibleColumnDefs.length + 1} style={{ height: topSpacerHeight }}></td>
+                </tr>
+              )}
+              {renderedRows.map((s) => {
               const isOpen = openId === s.id;
               const isPlaying = playingId === s.id;
               return (
@@ -184,7 +231,13 @@ function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, on
                   {visibleColumnDefs.map((col) => <td key={col.key} className={col.className || ""}>{cellValue(s, col.key, isOpen)}</td>)}
                 </tr>
               );
-            })}
+              })}
+              {bottomSpacerHeight > 0 && (
+                <tr className="virtual-table-spacer" aria-hidden="true">
+                  <td colSpan={visibleColumnDefs.length + 1} style={{ height: bottomSpacerHeight }}></td>
+                </tr>
+              )}
+            </>}
           </tbody>
         </table>
       </div>
@@ -192,7 +245,8 @@ function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, on
   );
 }
 
-function StreamSoundDetail({ sound, onPlay, onNavigate, onPlaybackInvalidate, playingId, playheadMs = 0, refreshRevision = 0 }) {
+function StreamSoundDetail({ sound, onPlay, onNavigate, onPlaybackInvalidate, playingId, refreshRevision = 0 }) {
+  const [playheadMs, setLivePlayheadMs] = useStateS(() => window.PysarPlayheadStore.getSnapshot());
   const D = window.PYSAR_DATA;
   const [details, setDetails] = useStateS(null);
   const [error, setError] = useStateS(null);
@@ -200,6 +254,11 @@ function StreamSoundDetail({ sound, onPlay, onNavigate, onPlaybackInvalidate, pl
   const [sourceBusy, setSourceBusy] = useStateS(false);
   const sourceRequestRef = React.useRef(0);
   const isPlaying = playingId === sound.id;
+  useEffectS(() => {
+    if (!isPlaying) return undefined;
+    setLivePlayheadMs(window.PysarPlayheadStore.getSnapshot());
+    return window.PysarPlayheadStore.subscribe(setLivePlayheadMs);
+  }, [isPlaying]);
   const player = D.players.find((item) => item.id === sound.player);
   const group = D.groups.find((item) => item.id === sound.group);
   const externalFile = (D.files || []).find((file) => file.external && file.fileIndex === sound.file) || null;
@@ -421,13 +480,19 @@ function StreamSoundDetail({ sound, onPlay, onNavigate, onPlaybackInvalidate, pl
   );
 }
 
-function SoundDetail({ sound, onPlay, onNavigate, playingId, playingSoundId = null, playheadMs = 0, durationMs = 0 }) {
+function SoundDetail({ sound, onPlay, onNavigate, playingId, playingSoundId = null, durationMs = 0 }) {
+  const [playheadMs, setLivePlayheadMs] = useStateS(() => window.PysarPlayheadStore.getSnapshot());
   const D = window.PYSAR_DATA;
   const bank = D.banks.find(b => b.id === sound.bank);
   const group = D.groups.find(g => g.id === sound.group);
   const player = D.players.find(p => p.id === sound.player);
   const isPlaying = playingId === sound.id;
   const isCurrent = playingSoundId === sound.id;
+  useEffectS(() => {
+    if (!isCurrent) return undefined;
+    setLivePlayheadMs(window.PysarPlayheadStore.getSnapshot());
+    return window.PysarPlayheadStore.subscribe(setLivePlayheadMs);
+  }, [isCurrent]);
   const totalDurationMs = Math.max(0, Number(durationMs || sound.durationMs) || 0);
   const shownPlayheadMs = isCurrent ? Math.max(0, Math.min(totalDurationMs, Number(playheadMs) || 0)) : 0;
   const waveformPlayhead = totalDurationMs > 0 ? shownPlayheadMs / totalDurationMs : 0;

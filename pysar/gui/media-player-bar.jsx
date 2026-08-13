@@ -58,12 +58,14 @@ function getMediaPlayerTheme(item) {
   return MEDIA_PLAYER_THEMES[item.type] || MEDIA_PLAYER_THEMES.DEFAULT;
 }
 
-function MediaPlayerBar({ playingSound, playingId, isPlaying, playheadMs, durationMs, volume, strmPlayback, autoPlayEnabled, seqVariations, onPlay, onPause, onStop, onSeek, onNext, onVolume, onStrmLoopChange, onAutoPlayChange, onStrmTrackSelectionChange, onSeqVariationChange }) {
+function MediaPlayerBar({ playingSound, playingId, isPlaying, durationMs, volume, strmPlayback, autoPlayEnabled, seqVariations, onPlay, onPause, onStop, onSeek, onNext, onVolume, onStrmLoopChange, onAutoPlayChange, onStrmTrackSelectionChange, onSeqVariationChange }) {
+  const [playheadMs, setLivePlayheadMs] = useStateT(() => window.PysarPlayheadStore.getSnapshot());
   const [volumeOpen, setVolumeOpen] = useStateT(false);
   const [scrubMs, setScrubMs] = useStateT(null);
   const [tracksOpen, setTracksOpen] = useStateT(false);
   const [variationsOpen, setVariationsOpen] = useStateT(false);
   const scrubActiveRef = React.useRef(false);
+  React.useEffect(() => window.PysarPlayheadStore.subscribe(setLivePlayheadMs), []);
   const theme = getMediaPlayerTheme(playingSound);
   const playbackIcon = pysarIconForPlayback(playingSound);
   const isStrmTransport = playingSound?.type === "STRM";

@@ -196,7 +196,14 @@ function App() {
   const [playingId, setPlayingId] = useStateA(null);
   const [playingSound, setPlayingSound] = useStateA(null);
   const [isPlaying, setIsPlaying] = useStateA(false);
-  const [playheadMs, setPlayheadMs] = useStateA(0);
+  // The playhead changes up to twenty times per second.  Keep it outside the
+  // root App state so a clock tick does not reconcile the complete archive UI.
+  const playheadMsRef = React.useRef(window.PysarPlayheadStore.getSnapshot());
+  const setPlayheadMs = useCallbackA((nextValue) => {
+    const next = Math.max(0, Number(nextValue) || 0);
+    playheadMsRef.current = next;
+    window.PysarPlayheadStore.set(next);
+  }, []);
   const [durationMs, setDurationMs] = useStateA(0);
   const [volume, setVolume] = useStateA(0.9);
   const [seqVariationBySound, setSeqVariationBySound] = useStateA({});
@@ -1869,7 +1876,7 @@ function App() {
     const next = setStrmPlayback(playingSound.id, { selectedTrackIndices: selection });
     if (playingId !== playingSound.id) return;
     if (isPlaying) {
-      playStrmTrackTransition(playingSound, playheadMs, next.selectedTrackIndices);
+      playStrmTrackTransition(playingSound, playheadMsRef.current, next.selectedTrackIndices);
       return;
     }
     // A paused stream must be regenerated before it is resumed so the new
@@ -2242,7 +2249,7 @@ function App() {
       audioRef.current.play().then(() => setIsPlaying(true)).catch((error) => setOpenError(String(error)));
       return;
     }
-    const resumeMs = audioRef.current?.ended ? 0 : playheadMs;
+    const resumeMs = audioRef.current?.ended ? 0 : playheadMsRef.current;
     if (currentSound.kind === "wave") {
       playWave({
         ...currentSound,
@@ -3253,7 +3260,6 @@ function App() {
           sound={tab.item}
           editorSourceText={seqEditorSourceBySound[tab.item.id] ?? null}
           onEditorSourceCommit={rememberSequenceEditorSource}
-          playheadMs={playheadMs}
           durationMs={durationMs}
           isPlaying={isPlaying}
           playingSound={playingSound}
@@ -3277,7 +3283,6 @@ function App() {
           onNavigate={navigateToReferrer}
           onPlay={play}
           playingId={playingId && isPlaying ? playingId : null}
-          playheadMs={playheadMs}
           refreshRevision={dataRevision}
           onPlaybackInvalidate={invalidateStrmSources}
         />
@@ -3289,7 +3294,6 @@ function App() {
         onPlay={play}
         playingId={playingId && isPlaying ? playingId : null}
         playingSoundId={playingSound?.id ?? null}
-        playheadMs={playheadMs}
         durationMs={durationMs}
       />;
     }
@@ -3583,7 +3587,6 @@ function App() {
         playingSound={playingSound}
         playingId={playingId}
         isPlaying={isPlaying}
-        playheadMs={playheadMs}
         durationMs={durationMs}
         volume={volume}
         strmPlayback={playingSound?.type === "STRM" ? strmPlaybackBySound[playingSound.id] : null}

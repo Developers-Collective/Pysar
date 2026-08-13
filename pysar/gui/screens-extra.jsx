@@ -201,7 +201,132 @@ function SeqKeyboard({ activeNotes }) {
   );
 }
 
-function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, playheadMs = 0, durationMs = 0, isPlaying = false, playingSound = null, selectedVariation = null, onVariation, variations = [], onLoadVariations, onSoundChange, safeMode = true, onDirty, onDataRefresh, onPlaybackInvalidate, onError, onDelete }) {
+function sequenceRelationLabel(relation) {
+  if (relation.kind === "root") return "Selected sequence";
+  if (relation.kind === "open") return `Opened track ${relation.trackNo}`;
+  if (relation.kind === "call") return "Called sequence";
+  if (relation.kind === "jump") return "Jump target";
+  if (relation.kind === "fallthrough") return "Continued sequence";
+  return "Related sequence";
+}
+
+function SequenceCodeView({ displayTracks, soundName, currentTrace, follow, codeRef }) {
+  const [viewport, setViewport] = React.useState({ scrollTop: 0, height: 600 });
+  const frameRef = React.useRef(null);
+  const model = React.useMemo(() => {
+    const rows = [];
+    const traceRows = new Map();
+    let top = 0;
+    displayTracks.forEach((track, sectionIndex) => {
+      const relation = track.relation || { kind: sectionIndex === 0 ? "root" : "related" };
+      if (sectionIndex > 0) {
+        rows.push({ key: `gap-${track.index}`, type: "gap", top, height: 9 });
+        top += 9;
+      }
+      rows.push({ key: `header-${track.index}`, type: "header", track, relation, top, height: 32 });
+      top += 32;
+      for (const line of track.lines || []) {
+        const row = { key: `line-${track.index}-${line.line}`, type: "line", track, line, top, height: 20 };
+        rows.push(row);
+        const traceKey = `${Number(track.index)}:${Number(line.offset)}`;
+        if (line.op && !traceRows.has(traceKey)) traceRows.set(traceKey, row);
+        top += 20;
+      }
+    });
+    return { rows, traceRows, totalHeight: top };
+  }, [displayTracks]);
+
+  const updateViewport = React.useCallback(() => {
+    if (frameRef.current != null) return;
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = null;
+      const element = codeRef.current;
+      if (!element) return;
+      setViewport((current) => {
+        const next = { scrollTop: element.scrollTop, height: element.clientHeight };
+        return current.scrollTop === next.scrollTop && current.height === next.height ? current : next;
+      });
+    });
+  }, [codeRef]);
+
+  React.useEffect(() => {
+    updateViewport();
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(updateViewport) : null;
+    if (codeRef.current) observer?.observe(codeRef.current);
+    return () => {
+      observer?.disconnect();
+      if (frameRef.current != null) window.cancelAnimationFrame(frameRef.current);
+    };
+  }, [codeRef, updateViewport]);
+
+  React.useEffect(() => {
+    if (!codeRef.current) return;
+    codeRef.current.scrollTop = 0;
+    setViewport({ scrollTop: 0, height: codeRef.current.clientHeight || 600 });
+  }, [displayTracks, codeRef]);
+
+  const activeKey = currentTrace
+    ? `${Number(currentTrace.trackIndex)}:${Number(currentTrace.offset)}`
+    : null;
+  const activeRow = activeKey ? model.traceRows.get(activeKey) : null;
+
+  React.useEffect(() => {
+    if (!follow || !activeRow || !codeRef.current) return;
+    const element = codeRef.current;
+    const padding = Math.min(80, element.clientHeight * 0.2);
+    const visibleTop = element.scrollTop + padding;
+    const visibleBottom = element.scrollTop + element.clientHeight - padding;
+    if (activeRow.top >= visibleTop && activeRow.top + activeRow.height <= visibleBottom) return;
+    element.scrollTop = Math.max(0, activeRow.top - element.clientHeight / 2 + activeRow.height / 2);
+    updateViewport();
+  }, [activeRow?.key, follow, codeRef, updateViewport]);
+
+  const overscan = 300;
+  const windowTop = Math.max(0, viewport.scrollTop - overscan);
+  const windowBottom = viewport.scrollTop + viewport.height + overscan;
+  let start = 0;
+  let end = model.rows.length;
+  while (start < model.rows.length && model.rows[start].top + model.rows[start].height < windowTop) start += 1;
+  end = start;
+  while (end < model.rows.length && model.rows[end].top <= windowBottom) end += 1;
+  const renderedRows = model.rows.slice(start, end);
+  const topSpacer = renderedRows.length ? renderedRows[0].top : 0;
+  const renderedBottom = renderedRows.length
+    ? renderedRows[renderedRows.length - 1].top + renderedRows[renderedRows.length - 1].height
+    : 0;
+  const bottomSpacer = Math.max(0, model.totalHeight - renderedBottom);
+
+  return (
+    <div className="seq-code seq-code-virtual" ref={codeRef} onScroll={updateViewport}>
+      {topSpacer > 0 && <div className="seq-code-spacer" style={{ height: topSpacer }} aria-hidden="true"></div>}
+      {renderedRows.map((row) => {
+        if (row.type === "gap") return <div key={row.key} className="seq-code-section-gap" aria-hidden="true"></div>;
+        if (row.type === "header") return (
+          <div key={row.key} className={`seq-track-section-header ${row.relation.kind === "root" ? "root" : "related"}`}>
+            <strong>{row.relation.kind === "root" ? soundName : (row.track.displayName || row.track.name)}</strong>
+            <span>{sequenceRelationLabel(row.relation)}</span>
+          </div>
+        );
+        const active = row.key === activeRow?.key;
+        const line = row.line;
+        return (
+          <div key={row.key} className={`seq-line kind-${line.kind}${active ? " active" : ""}`}>
+            <span className="lno">{line.line}</span>
+            <span className="off">{line.offsetHex}</span>
+            <span className="lbl">{line.label}</span>
+            <span className="src">
+              <span className="op">{line.op}</span>{line.op && line.arg && " "}<span className="arg">{line.arg}</span>
+            </span>
+          </div>
+        );
+      })}
+      {bottomSpacer > 0 && <div className="seq-code-spacer" style={{ height: bottomSpacer }} aria-hidden="true"></div>}
+    </div>
+  );
+}
+
+function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, durationMs = 0, isPlaying = false, playingSound = null, selectedVariation = null, onVariation, variations = [], onLoadVariations, onSoundChange, safeMode = true, onDirty, onDataRefresh, onPlaybackInvalidate, onError, onDelete }) {
+  const [playheadMs, setLivePlayheadMs] = React.useState(() => window.PysarPlayheadStore.getSnapshot());
   const [details, setDetails] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState(null);
@@ -214,7 +339,6 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
   const [exportMenuOpen, setExportMenuOpen] = React.useState(false);
   const [lintState, setLintState] = React.useState({ status: "idle", error: "", line: null });
   const codeRef = React.useRef(null);
-  const activeLineRef = React.useRef(null);
   const exportMenuRef = React.useRef(null);
   const sourceEditorRef = React.useRef(null);
   const sourceHighlightRef = React.useRef(null);
@@ -222,6 +346,14 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
   const lintRequestRef = React.useRef(0);
   const playbackWasRunningRef = React.useRef(false);
   const safeModeBlocksEditing = safeMode && sound.isNew !== true;
+  const ownsPlayhead = !!playingSound && playingSound.id === sound.id;
+  const isThisPlaying = ownsPlayhead && isPlaying;
+
+  React.useEffect(() => {
+    if (!ownsPlayhead) return undefined;
+    setLivePlayheadMs(window.PysarPlayheadStore.getSnapshot());
+    return window.PysarPlayheadStore.subscribe(setLivePlayheadMs);
+  }, [ownsPlayhead]);
 
   React.useEffect(() => {
     if (!exportMenuOpen) return undefined;
@@ -361,9 +493,11 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
   }, [sound.id, onLoadVariations]);
 
   const tracks = details?.tracks || [];
-  const displayTracks = details?.relatedTracks?.length
-    ? details.relatedTracks
-    : tracks.slice(details?.startTrackIndex || 0, (details?.startTrackIndex || 0) + 1);
+  const displayTracks = React.useMemo(() => (
+    details?.relatedTracks?.length
+      ? details.relatedTracks
+      : tracks.slice(details?.startTrackIndex || 0, (details?.startTrackIndex || 0) + 1)
+  ), [details?.relatedTracks, details?.startTrackIndex, tracks]);
   const trace = details?.trace || [];
   const currentEditorTarget = React.useMemo(() => (
     (details?.sharedSounds || []).find((candidate) => Number(candidate.id) === Number(sound.id)) || {
@@ -475,40 +609,13 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
     return () => window.clearTimeout(timeout);
   }, [editing, sourceText]);
 
-  const isThisPlaying = !!playingSound && playingSound.id === sound.id && isPlaying;
+  const currentTraceIndex = React.useMemo(
+    () => isThisPlaying ? window.PysarTraceIndexAtOrBefore(trace, playheadMs) : -1,
+    [isThisPlaying, trace, playheadMs],
+  );
   const currentTrace = React.useMemo(() => {
-    if (!isThisPlaying || !trace.length) return null;
-    let current = null;
-    for (const event of trace) {
-      if ((event.ms || 0) <= playheadMs) current = event;
-      else break;
-    }
-    return current;
-  }, [isThisPlaying, trace, playheadMs]);
-  const activeLine = React.useMemo(() => {
-    if (!isThisPlaying || !displayTracks.length) return null;
-    if (!currentTrace) return null;
-    const currentTrack = displayTracks.find(
-      (track) => Number(track.index) === Number(currentTrace.trackIndex),
-    );
-    return currentTrack?.lines.find(
-      (line) => line.op && Number(line.offset) === Number(currentTrace.offset),
-    ) || null;
-  }, [isThisPlaying, displayTracks, currentTrace]);
-
-  React.useEffect(() => {
-    if (!follow || !activeLineRef.current || !codeRef.current) return;
-    const container = codeRef.current;
-    const lineRect = activeLineRef.current.getBoundingClientRect();
-    const containerRect = container.getBoundingClientRect();
-    const nextTop = (
-      container.scrollTop
-      + lineRect.top - containerRect.top
-      - container.clientHeight / 2
-      + lineRect.height / 2
-    );
-    container.scrollTo({ top: Math.max(0, nextTop), behavior: "smooth" });
-  }, [follow, activeLine?.line]);
+    return currentTraceIndex >= 0 ? trace[currentTraceIndex] : null;
+  }, [trace, currentTraceIndex]);
 
   React.useEffect(() => {
     if (isThisPlaying) {
@@ -527,10 +634,10 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
   }, [isThisPlaying, follow, playheadMs, durationMs, sound.id]);
 
   const activeNotes = React.useMemo(() => {
-    if (!isThisPlaying || !trace.length) return [];
+    if (!isThisPlaying || currentTraceIndex < 0) return [];
     const out = [];
-    for (const ev of trace) {
-      if (ev.ms > playheadMs) break;
+    for (let index = 0; index <= currentTraceIndex; index += 1) {
+      const ev = trace[index];
       if (ev.note == null) continue;
       const end = ev.ms + (ev.lengthMs || 0);
       if (end > playheadMs) {
@@ -538,7 +645,7 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
       }
     }
     return out;
-  }, [isThisPlaying, trace, playheadMs]);
+  }, [isThisPlaying, trace, currentTraceIndex, playheadMs]);
 
   if (loading) {
     return (
@@ -723,53 +830,13 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
         </div>
       ) : (
         <>
-          <div className="seq-code" ref={codeRef}>
-            {displayTracks.map((track, sectionIndex) => {
-              const relation = track.relation || { kind: sectionIndex === 0 ? "root" : "related" };
-              const relationText = relation.kind === "root"
-                ? "Selected sequence"
-                : relation.kind === "open"
-                  ? `Opened track ${relation.trackNo}`
-                  : relation.kind === "call"
-                    ? "Called sequence"
-                    : relation.kind === "jump"
-                      ? "Jump target"
-                      : relation.kind === "fallthrough"
-                        ? "Continued sequence"
-                      : "Related sequence";
-              return (
-                <section
-                  key={track.index}
-                  className={`seq-track-section ${relation.kind === "root" ? "root" : "related"}`}
-                >
-                  <div className="seq-track-section-header">
-                    <strong>{relation.kind === "root" ? sound.name : (track.displayName || track.name)}</strong>
-                    <span>{relationText}</span>
-                  </div>
-                  {track.lines.map((l) => {
-                    const active = (
-                      activeLine?.line === l.line
-                      && Number(currentTrace?.trackIndex) === Number(track.index)
-                    );
-                    return (
-                      <div
-                        key={l.line}
-                        ref={active ? activeLineRef : null}
-                        className={"seq-line kind-" + l.kind + (active ? " active" : "")}
-                      >
-                        <span className="lno">{l.line}</span>
-                        <span className="off">{l.offsetHex}</span>
-                        <span className="lbl">{l.label}</span>
-                        <span className="src">
-                          <span className="op">{l.op}</span>{l.op && l.arg && " "}<span className="arg">{l.arg}</span>
-                        </span>
-                      </div>
-                    );
-                  })}
-                </section>
-              );
-            })}
-          </div>
+          <SequenceCodeView
+            displayTracks={displayTracks}
+            soundName={sound.name}
+            currentTrace={currentTrace}
+            follow={follow}
+            codeRef={codeRef}
+          />
           <SeqKeyboard activeNotes={activeNotes} />
         </>
       )}

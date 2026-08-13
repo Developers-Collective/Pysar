@@ -53,6 +53,45 @@
     return Number(activeSound.id) === Number(requestedSound.id);
   }
 
+  function createPlayheadStore(initialValue = 0) {
+    let value = Math.max(0, Number(initialValue) || 0);
+    const listeners = new Set();
+    return {
+      getSnapshot() {
+        return value;
+      },
+      set(nextValue) {
+        const next = Math.max(0, Number(nextValue) || 0);
+        if (Object.is(next, value)) return;
+        value = next;
+        for (const listener of Array.from(listeners)) listener(value);
+      },
+      subscribe(listener) {
+        if (typeof listener !== "function") return () => {};
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    };
+  }
+
+  function traceIndexAtOrBefore(trace, playheadMs) {
+    const events = Array.isArray(trace) ? trace : [];
+    const target = Number(playheadMs) || 0;
+    let low = 0;
+    let high = events.length - 1;
+    let result = -1;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      if ((Number(events[middle]?.ms) || 0) <= target) {
+        result = middle;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    return result;
+  }
+
   class ProgressiveLoopClock {
     constructor(sampleRate, startFrame, loopStartFrame, totalFrames, contextStartTime) {
       this.sampleRate = Math.max(1, Math.trunc(Number(sampleRate) || 1));
@@ -99,4 +138,7 @@
   global.PysarNextVisibleSoundId = nextVisibleSoundId;
   global.PysarIsSoundListTransport = isSoundListTransport;
   global.PysarShouldPreserveSoundTransport = shouldPreserveSoundTransport;
+  global.PysarCreatePlayheadStore = createPlayheadStore;
+  global.PysarPlayheadStore = global.PysarPlayheadStore || createPlayheadStore();
+  global.PysarTraceIndexAtOrBefore = traceIndexAtOrBefore;
 })(typeof window !== "undefined" ? window : globalThis);
