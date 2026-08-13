@@ -126,6 +126,7 @@ class PysarApi:
         self._context_cache_lock = threading.Lock()
         self._strm_source_revision = 0
         self._duration_cache: dict[tuple, int] = {}
+        self._sequence_playback_cache: dict[tuple, dict[str, Any]] = {}
         self._duration_pending: set[tuple] = set()
         self._duration_lock = threading.Lock()
         self._warm_lock = threading.Lock()
@@ -1005,9 +1006,18 @@ class PysarApi:
             key = self._duration_cache_key(int(sound_id), spec)
             with self._duration_lock:
                 cached = self._duration_cache.get(key)
+                seq_playback = self._sequence_playback_cache.get(key)
             if cached is not None:
                 self._warm_sound_preview_async(int(sound_id), spec)
-                return {"ok": True, "durationMs": cached}
+                effective_duration = (
+                    int(seq_playback.get("loopEndMs") or cached)
+                    if seq_playback and seq_playback.get("looped")
+                    else cached
+                )
+                result = {"ok": True, "durationMs": effective_duration}
+                if seq_playback is not None:
+                    result["seqPlayback"] = dict(seq_playback)
+                return result
             archive = self.project_service.require_archive(self.session)
             entry = self.archive_service._sound_entry(archive, int(sound_id))
             if entry.sound_type == SoundType.SEQ:
@@ -1039,18 +1049,26 @@ class PysarApi:
                 current_path = str(self.session.archive_path) if self.session.archive_path is not None else None
                 if current_path != key[0]:
                     return
-                duration_ms = self._estimate_sound_duration_ms(sound_id, spec)
+                duration_ms, seq_playback = self._inspect_sound_timing(sound_id, spec)
                 current_path = str(self.session.archive_path) if self.session.archive_path is not None else None
                 if current_path != key[0]:
                     return
                 with self._duration_lock:
                     self._duration_cache[key] = duration_ms
+                    if seq_playback is not None:
+                        self._sequence_playback_cache[key] = seq_playback
+                effective_duration = (
+                    int(seq_playback.get("loopEndMs") or duration_ms)
+                    if seq_playback and seq_playback.get("looped")
+                    else duration_ms
+                )
                 self.push_event("duration_update", {
                     "soundId": sound_id,
-                    "durationMs": duration_ms,
+                    "durationMs": effective_duration,
                     "seqNoteOverride": spec.get("seq_note_override"),
                     "seqProgramOverride": spec.get("seq_program_override"),
                     "seqRandomOverrides": list(spec.get("seq_random_overrides") or ()),
+                    "seqPlayback": seq_playback,
                 })
             finally:
                 with self._duration_lock:
@@ -1105,6 +1123,7 @@ class PysarApi:
             if entry.sound_type == SoundType.SEQ:
                 with self._duration_lock:
                     duration_ms = self._duration_cache.get(cache_key)
+                    seq_playback = self._sequence_playback_cache.get(cache_key)
                 if duration_ms is None:
                     # Never make Play wait for a full sequence walk merely to
                     # learn its final length. The stream starts immediately;
@@ -1115,6 +1134,10 @@ class PysarApi:
                     spec["finite_stream"] = False
                 else:
                     spec["finite_stream"] = duration_ms > 0
+                    if seq_playback and seq_playback.get("looped"):
+                        duration_ms = max(0, int(seq_playback.get("loopEndMs") or duration_ms))
+                        spec["seq_loop_end_ms"] = duration_ms
+                        spec["total_frames"] = max(0, int(seq_playback.get("loopEndFrame") or 0))
             else:
                 spec["finite_stream"] = True
                 duration_ms = self._estimate_sound_duration_ms(int(sound_id), spec)
@@ -1172,6 +1195,8 @@ class PysarApi:
                 "url": self._stream_url(token),
                 "durationMs": duration_ms,
             }
+            if entry.sound_type == SoundType.SEQ and seq_playback is not None:
+                result["seqPlayback"] = dict(seq_playback)
             if strm_playback is not None:
                 result["strmPlayback"] = strm_playback
             if strm_progressive is not None:
@@ -1276,6 +1301,7 @@ class PysarApi:
             self._stream_specs.clear()
         with self._duration_lock:
             self._duration_cache.clear()
+            self._sequence_playback_cache.clear()
             self._duration_pending.clear()
         with self._warm_lock:
             self._warm_keys.clear()
@@ -1776,13 +1802,17 @@ class PysarApi:
                     duration_key = self._duration_cache_key(int(spec["sound_id"]), spec)
                     with self._duration_lock:
                         self._duration_cache[duration_key] = exact_ms
-                    self.push_event("duration_update", {
+                        seq_playback = self._sequence_playback_cache.get(duration_key)
+                    duration_payload = {
                         "soundId": int(spec["sound_id"]),
                         "durationMs": exact_ms,
                         "seqNoteOverride": spec.get("seq_note_override"),
                         "seqProgramOverride": spec.get("seq_program_override"),
                         "seqRandomOverrides": list(spec.get("seq_random_overrides") or ()),
-                    })
+                    }
+                    if seq_playback is not None:
+                        duration_payload["seqPlayback"] = dict(seq_playback)
+                    self.push_event("duration_update", duration_payload)
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception:
@@ -1866,9 +1896,20 @@ class PysarApi:
                 key = self._duration_cache_key(int(spec["sound_id"]), spec)
                 with self._duration_lock:
                     duration_ms = self._duration_cache.get(key)
+                    seq_playback = self._sequence_playback_cache.get(key)
                 if duration_ms is not None and duration_ms > 0:
-                    remaining_ms = max(0, int(duration_ms) - int(spec.get("offset_ms") or 0))
-                    max_frames = round(remaining_ms * sample_rate / 1000)
+                    if seq_playback and seq_playback.get("looped") and seq_playback.get("loopEndFrame") is not None:
+                        metadata_rate = max(1, int(seq_playback.get("sampleRate") or sample_rate))
+                        loop_end_frame = round(int(seq_playback["loopEndFrame"]) * sample_rate / metadata_rate)
+                        max_frames = max(0, loop_end_frame - skip_frames)
+                    else:
+                        effective_duration_ms = (
+                            int(seq_playback.get("loopEndMs") or duration_ms)
+                            if seq_playback and seq_playback.get("looped")
+                            else int(duration_ms)
+                        )
+                        remaining_ms = max(0, effective_duration_ms - int(spec.get("offset_ms") or 0))
+                        max_frames = round(remaining_ms * sample_rate / 1000)
             return max_frames
 
         def trim(chunks, *, apply_skip: bool = True):
@@ -1977,6 +2018,7 @@ class PysarApi:
                 spec.get("seq_note_override"),
                 spec.get("seq_program_override"),
                 tuple(spec.get("seq_random_overrides") or ()),
+                max(0, int(spec.get("seq_loop_end_ms") or 0)),
                 tuple(spec.get("strm_track_indices") or ()),
                 max(0, int(spec.get("offset_ms") or 0)),
                 max(0, int(spec.get("start_frame") or 0)),
@@ -2108,19 +2150,26 @@ class PysarApi:
         return np.round(np.clip(pcm, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
 
     def _estimate_sound_duration_ms(self, sound_id: int, spec: dict[str, Any]) -> int:
+        return self._inspect_sound_timing(sound_id, spec)[0]
+
+    def _inspect_sound_timing(
+        self,
+        sound_id: int,
+        spec: dict[str, Any],
+    ) -> tuple[int, dict[str, Any] | None]:
         try:
             archive = self.project_service.require_archive(self.session)
             entry = self.archive_service._sound_entry(archive, sound_id)
             name = self.archive_service._sound_name(archive, sound_id, entry)
             context = self._get_or_create_context(archive, name)
             if context.sound_type == SoundType.STRM and context.brstm is not None:
-                return int(round(context.brstm.duration * 1000))
+                return int(round(context.brstm.duration * 1000)), None
             if context.sound_type == SoundType.WAVE and context.brwsd is not None and context.brwar is not None:
                 wave_index = int(context.extras.get("wave_sound_index", -1))
                 if 0 <= wave_index < len(context.brwsd):
                     notes = context.brwsd[wave_index].notes
                     if notes and 0 <= int(notes[0].wave_index) < len(context.brwar):
-                        return int(round(float(context.brwar[int(notes[0].wave_index)].duration) * 1000))
+                        return int(round(float(context.brwar[int(notes[0].wave_index)].duration) * 1000)), None
             if context.sound_type == SoundType.SEQ and context.brseq is not None:
                 options = None
                 if spec.get("seq_note_override") is not None or spec.get("seq_program_override") is not None or spec.get("seq_random_overrides"):
@@ -2129,13 +2178,22 @@ class PysarApi:
                         seq_program_override=spec.get("seq_program_override"),
                         seq_random_overrides=tuple(spec.get("seq_random_overrides") or ()),
                     )
-                return self._estimate_sequence_duration_ms(context, options)
+                return self._inspect_sequence_timing(context, options)
         except Exception:
-            return 0
-        return 0
+            return 0, None
+        return 0, None
 
     @staticmethod
     def _estimate_sequence_duration_ms(context, options: PreviewOptions | None = None) -> int:
+        return PysarApi._inspect_sequence_timing(context, options)[0]
+
+    @staticmethod
+    def _inspect_sequence_timing(
+        context,
+        options: PreviewOptions | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        from pysar.core.format.rseq.mml import MML
+
         settings = options.to_render_options() if options is not None else PreviewOptions().to_render_options()
         try:
             player = SequenceRenderer().make_sequence_player(context, settings)
@@ -2154,9 +2212,34 @@ class PysarApi:
         # every mixer-control event and retaining the complete event list can
         # monopolize the Python/UI thread for long sequences while playback
         # is filling its buffer.
+        loop_starts: dict[int, tuple[int, int]] = {}
+        first_execution: dict[tuple[int, int], int] = {}
+        loop_candidates: list[tuple[int, int, int]] = []
+
+        def on_command(track_no: int, tick: int, command) -> None:
+            track = int(track_no)
+            command_tick = int(tick)
+            offset = int(command.offset or 0)
+            first_execution.setdefault((track, offset), command_tick)
+            mml = command.get_mml()
+            if mml == MML.LOOP_START:
+                count = int(command.args[0]) if command.args else 0
+                loop_starts[track] = (command_tick, count)
+            elif mml == MML.LOOP_END:
+                start = loop_starts.get(track)
+                if start is not None and start[1] == 0:
+                    loop_candidates.append((track, start[0], command_tick))
+            elif mml == MML.JUMP and command.args:
+                target = int(command.args[0])
+                start_tick = first_execution.get((track, target))
+                if start_tick is not None and target <= offset:
+                    loop_candidates.append((track, start_tick, command_tick))
+
+        player.set_command_callback(on_command)
         tempo = 120
         last_event_tick = 0
         timing_segments: list[tuple[int, int]] = []
+        tempo_changes: list[tuple[int, int]] = [(0, tempo)]
         for tick, events in player.iter_event_ticks(
             max_ticks=settings.max_ticks,
             loop_count=settings.loop_count,
@@ -2171,8 +2254,16 @@ class PysarApi:
             for event in events:
                 if event.get("type") == "tempo":
                     tempo = int(event.get("tempo", tempo) or tempo)
+                    tempo_changes.append((int(tick), tempo))
         if not timing_segments:
-            return 0
+            return 0, {
+                "looped": False,
+                "loopStartMs": 0,
+                "loopEndMs": 0,
+                "loopStartFrame": 0,
+                "loopEndFrame": 0,
+                "sampleRate": settings.sample_rate,
+            }
         # Reproduce _seq_event_times_ms' arithmetic exactly so the optimized
         # scan cannot shift an existing duration by even one millisecond.
         timebase = max(1, player.timebase)
@@ -2182,8 +2273,49 @@ class PysarApi:
         last_ms = int(round(current_time * 1000))
         duration_ms = int(round(last_ms + settings.tail_seconds * 1000))
         if player.truncated:
-            return min(duration_ms, PysarApi._TRUNCATED_SEQUENCE_PREVIEW_MS)
-        return duration_ms
+            duration_ms = min(duration_ms, PysarApi._TRUNCATED_SEQUENCE_PREVIEW_MS)
+
+        def tick_to_seconds(target_tick: int) -> float:
+            target = max(0, int(target_tick))
+            elapsed = 0.0
+            cursor = 0
+            active_tempo = 120
+            for change_tick, next_tempo in sorted(tempo_changes, key=lambda item: item[0]):
+                if change_tick > target:
+                    break
+                elapsed += max(0, change_tick - cursor) * 60.0 / (max(1, active_tempo) * timebase)
+                cursor = max(cursor, change_tick)
+                active_tempo = max(1, int(next_tempo))
+            elapsed += max(0, target - cursor) * 60.0 / (max(1, active_tempo) * timebase)
+            return elapsed
+
+        valid_candidates = [item for item in loop_candidates if item[2] > item[1]]
+        selected = next((item for item in valid_candidates if item[0] == 0), None)
+        if selected is None and valid_candidates:
+            selected = valid_candidates[0]
+        playback = {
+            "looped": False,
+            "loopStartMs": 0,
+            "loopEndMs": 0,
+            "loopStartFrame": 0,
+            "loopEndFrame": 0,
+            "sampleRate": settings.sample_rate,
+        }
+        if selected is not None:
+            loop_start_seconds = tick_to_seconds(selected[1])
+            loop_end_seconds = tick_to_seconds(selected[2])
+            loop_start_ms = int(round(loop_start_seconds * 1000))
+            loop_end_ms = int(round(loop_end_seconds * 1000))
+            if loop_end_ms > loop_start_ms:
+                playback = {
+                    "looped": True,
+                    "loopStartMs": loop_start_ms,
+                    "loopEndMs": loop_end_ms,
+                    "loopStartFrame": round(loop_start_seconds * settings.sample_rate),
+                    "loopEndFrame": round(loop_end_seconds * settings.sample_rate),
+                    "sampleRate": settings.sample_rate,
+                }
+        return duration_ms, playback
 
     def _estimate_wave_sample_duration_ms(self, archive_file_id: int, wave_index: int) -> int:
         try:

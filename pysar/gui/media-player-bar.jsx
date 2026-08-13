@@ -58,7 +58,7 @@ function getMediaPlayerTheme(item) {
   return MEDIA_PLAYER_THEMES[item.type] || MEDIA_PLAYER_THEMES.DEFAULT;
 }
 
-function MediaPlayerBar({ playingSound, playingId, isPlaying, durationMs, volume, strmPlayback, autoPlayEnabled, seqVariations, onPlay, onPause, onStop, onSeek, onNext, onVolume, onStrmLoopChange, onAutoPlayChange, onStrmTrackSelectionChange, onSeqVariationChange }) {
+function MediaPlayerBar({ playingSound, playingId, isPlaying, durationMs, volume, strmPlayback, seqPlayback, autoPlayEnabled, seqVariations, onPlay, onPause, onStop, onSeek, onNext, onVolume, onStrmLoopChange, onSeqLoopChange, onAutoPlayChange, onStrmTrackSelectionChange, onSeqVariationChange }) {
   const [playheadMs, setLivePlayheadMs] = useStateT(() => window.PysarPlayheadStore.getSnapshot());
   const [volumeOpen, setVolumeOpen] = useStateT(false);
   const [scrubMs, setScrubMs] = useStateT(null);
@@ -176,6 +176,17 @@ function MediaPlayerBar({ playingSound, playingId, isPlaying, durationMs, volume
                         checked={!!strmPlayback?.loopEnabled}
                         disabled={!strmPlayback?.looped}
                         onChange={(event) => onStrmLoopChange?.(event.target.checked)}
+                      />
+                      <span>Loop</span>
+                    </label>
+                  )}
+                  {isSeqTransport && (
+                    <label className={"tp-loop" + (seqPlayback?.looped ? "" : " unavailable")} title={seqPlayback?.loading ? "Detecting BRSEQ loop points…" : seqPlayback?.looped ? "Loop this BRSEQ at its loop point" : "This BRSEQ has no infinite loop"}>
+                      <input
+                        type="checkbox"
+                        checked={!!seqPlayback?.loopEnabled}
+                        disabled={!seqPlayback?.looped}
+                        onChange={(event) => onSeqLoopChange?.(event.target.checked)}
                       />
                       <span>Loop</span>
                     </label>

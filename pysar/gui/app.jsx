@@ -208,6 +208,7 @@ function App() {
   const [volume, setVolume] = useStateA(0.9);
   const [seqVariationBySound, setSeqVariationBySound] = useStateA({});
   const [seqVariationsBySound, setSeqVariationsBySound] = useStateA({});
+  const [seqPlaybackBySound, setSeqPlaybackBySound] = useStateA({});
   const [seqVariationRevision, setSeqVariationRevision] = useStateA(0);
   const [seqEditorSourceBySound, setSeqEditorSourceBySound] = useStateA({});
   const [strmPlaybackBySound, setStrmPlaybackBySound] = useStateA({});
@@ -227,6 +228,7 @@ function App() {
   const soundListAutoPlayEnabledRef = React.useRef(false);
   const visibleSoundIdsRef = React.useRef([]);
   const seqVariationsBySoundRef = React.useRef({});
+  const seqPlaybackBySoundRef = React.useRef({});
   const seqVariationLoadsRef = React.useRef(new Set());
   const seqVariationRevisionRef = React.useRef(0);
 
@@ -393,13 +395,14 @@ function App() {
           || JSON.stringify(normalizedPairs(variation?.randomOverrides))
             !== JSON.stringify(normalizedPairs(payload.seqRandomOverrides))
         ) return;
+        if (payload.seqPlayback) applySeqPlaybackMetadata(soundId, payload.seqPlayback);
         setDurationMs((cur) => {
-          if (cur > 0) return cur;              // already known
+          if (cur > 0 && !payload.seqPlayback?.looped) return cur;
           return Math.max(0, Math.round(newDuration || 0));
         });
         setPlayingSound((cur) => {
           if (!cur || cur.id !== soundId) return cur;
-          if (cur.durationMs > 0) return cur;   // already set
+          if (cur.durationMs > 0 && !payload.seqPlayback?.looped) return cur;
           return { ...cur, durationMs: Math.max(0, Math.round(newDuration || 0)) };
         });
       }
@@ -818,6 +821,8 @@ function App() {
     onEnded = null,
     onStreamError = null,
     t0 = null,
+    sequencePlayback = null,
+    sequenceSoundId = null,
   ) {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass || !window.fetch) return false;
@@ -928,6 +933,82 @@ function App() {
       let started = false;
       let failureHandled = false;
       const maxScheduleAheadSeconds = 2;
+      const offsetFrame = Math.max(0, Math.round(offsetMs * wav.sampleRate / 1000));
+      const maxSequenceLoopBytes = 64 * 1024 * 1024;
+      let loopStartFrame = 0;
+      let loopEndFrame = 0;
+      let loopFrameCount = 0;
+      const loopParts = [];
+      let loopBytes = 0;
+      let loopCaptureOverflow = false;
+      const pendingMetadataParts = [];
+      let pendingMetadataBytes = 0;
+      let pendingMetadataOverflow = false;
+      let loopMetadataResolved = false;
+      let loopSource = null;
+      let loopRequested = !!sequencePlayback?.loopEnabled;
+      let loopEnabled = false;
+
+      function captureLoopOverlap(absoluteStart, bytes) {
+        if (loopFrameCount <= 0 || loopCaptureOverflow) return;
+        const frames = Math.floor(bytes.length / wav.blockAlign);
+        const absoluteEnd = absoluteStart + frames;
+        const overlapStart = Math.max(loopStartFrame, absoluteStart);
+        const overlapEnd = Math.min(loopEndFrame, absoluteEnd);
+        if (overlapEnd <= overlapStart) return;
+        const firstByte = (overlapStart - absoluteStart) * wav.blockAlign;
+        const lastByte = (overlapEnd - absoluteStart) * wav.blockAlign;
+        const copy = bytes.slice(firstByte, lastByte);
+        if (loopBytes + copy.length <= maxSequenceLoopBytes) {
+          loopParts.push(copy);
+          loopBytes += copy.length;
+        } else {
+          loopCaptureOverflow = true;
+          loopParts.length = 0;
+          loopBytes = 0;
+        }
+      }
+
+      function configureSequenceLoop(metadata) {
+        if (!metadata || metadata.loading || typeof metadata.looped !== "boolean") return;
+        const metadataSampleRate = Math.max(1, Number(metadata.sampleRate) || wav.sampleRate);
+        const nextLoopStartFrame = metadata.looped ? Math.max(0, Math.round(
+          metadata.loopStartFrame != null
+            ? Number(metadata.loopStartFrame) * wav.sampleRate / metadataSampleRate
+            : Number(metadata.loopStartMs || 0) * wav.sampleRate / 1000,
+        )) : 0;
+        const nextLoopEndFrame = metadata.looped ? Math.max(nextLoopStartFrame, Math.round(
+          metadata.loopEndFrame != null
+            ? Number(metadata.loopEndFrame) * wav.sampleRate / metadataSampleRate
+            : Number(metadata.loopEndMs || 0) * wav.sampleRate / 1000,
+        )) : 0;
+        loopRequested = !!metadata.loopEnabled;
+        if (
+          loopMetadataResolved
+          && nextLoopStartFrame === loopStartFrame
+          && nextLoopEndFrame === loopEndFrame
+        ) {
+          loopEnabled = loopRequested && loopFrameCount > 0;
+          if (loopEnabled && loopSource) loopSource.loop = true;
+          if (loopEnabled && readingFinished) installSequenceLoop();
+          if (!loopEnabled && loopSource) loopSource.loop = false;
+          return;
+        }
+        loopMetadataResolved = true;
+        loopStartFrame = nextLoopStartFrame;
+        loopEndFrame = nextLoopEndFrame;
+        loopFrameCount = loopEndFrame - loopStartFrame;
+        loopEnabled = loopRequested && loopFrameCount > 0;
+        loopParts.length = 0;
+        loopBytes = 0;
+        loopCaptureOverflow = pendingMetadataOverflow;
+        if (!loopCaptureOverflow && loopFrameCount > 0) {
+          for (const part of pendingMetadataParts) captureLoopOverlap(part.startFrame, part.bytes);
+        }
+        pendingMetadataParts.length = 0;
+        pendingMetadataBytes = 0;
+        if (readingFinished) installSequenceLoop();
+      }
 
       function isCurrent() {
         return adapter === audioRef.current
@@ -936,7 +1017,14 @@ function App() {
 
       function localPosition() {
         if (!started) return 0;
-        return Math.max(0, Math.min(scheduledFrames / wav.sampleRate, context.currentTime - clockStartTime));
+        const elapsedFrames = Math.max(0, Math.floor((context.currentTime - clockStartTime) * wav.sampleRate));
+        let absoluteFrame = offsetFrame + elapsedFrames;
+        if (loopSource && loopFrameCount > 0 && absoluteFrame >= loopEndFrame) {
+          absoluteFrame = loopStartFrame + ((absoluteFrame - loopEndFrame) % loopFrameCount);
+        } else {
+          absoluteFrame = Math.min(offsetFrame + scheduledFrames, absoluteFrame);
+        }
+        return (absoluteFrame - offsetFrame) / wav.sampleRate;
       }
       function finishPlayback() {
         if (closed || ended) return;
@@ -950,6 +1038,19 @@ function App() {
       function schedulePcm(bytes) {
         const frames = Math.floor(bytes.length / wav.blockAlign);
         if (!frames) return;
+        const absoluteStart = offsetFrame + scheduledFrames;
+        if (!loopMetadataResolved && !pendingMetadataOverflow) {
+          const copy = bytes.slice();
+          if (pendingMetadataBytes + copy.length <= maxSequenceLoopBytes) {
+            pendingMetadataParts.push({ startFrame: absoluteStart, bytes: copy });
+            pendingMetadataBytes += copy.length;
+          } else {
+            pendingMetadataOverflow = true;
+            pendingMetadataParts.length = 0;
+            pendingMetadataBytes = 0;
+          }
+        }
+        if (loopMetadataResolved) captureLoopOverlap(absoluteStart, bytes);
         const buffer = context.createBuffer(wav.channels, frames, wav.sampleRate);
         const view = new DataView(bytes.buffer, bytes.byteOffset, frames * wav.blockAlign);
         for (let channel = 0; channel < wav.channels; channel += 1) {
@@ -976,11 +1077,41 @@ function App() {
         source.onended = () => {
           sources.delete(source);
           source.disconnect();
-          if (readingFinished && source === lastSource) finishPlayback();
+          if (readingFinished && source === lastSource && !loopSource) finishPlayback();
         };
         source.start(nextStartTime);
         nextStartTime += frames / wav.sampleRate;
         scheduledFrames += frames;
+      }
+      function installSequenceLoop() {
+        if (!loopEnabled || loopSource || loopFrameCount <= 0 || loopCaptureOverflow) return false;
+        if (loopBytes !== loopFrameCount * wav.blockAlign) return false;
+        const bytes = new Uint8Array(loopBytes);
+        let cursor = 0;
+        for (const part of loopParts) {
+          bytes.set(part, cursor);
+          cursor += part.length;
+        }
+        const buffer = context.createBuffer(wav.channels, loopFrameCount, wav.sampleRate);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        for (let channel = 0; channel < wav.channels; channel += 1) {
+          const output = buffer.getChannelData(channel);
+          for (let frame = 0; frame < loopFrameCount; frame += 1) {
+            output[frame] = view.getInt16(frame * wav.blockAlign + channel * 2, true) / 32768;
+          }
+        }
+        const source = context.createBufferSource();
+        source.buffer = buffer;
+        source.loop = true;
+        source.connect(gain);
+        source.onended = () => {
+          source.disconnect();
+          if (loopSource === source) loopSource = null;
+          if (!loopEnabled) finishPlayback();
+        };
+        loopSource = source;
+        source.start(nextStartTime);
+        return true;
       }
       function consumePcm(bytes, flush = false) {
         pendingPcm = appendBytes(pendingPcm, bytes);
@@ -998,6 +1129,8 @@ function App() {
 
       adapter = {
         isProgressivePcm: true,
+        sequenceSoundId,
+        get isSequenceLoop() { return loopFrameCount > 0; },
         get ended() { return ended; },
         get duration() {
           const known = Math.max(0, Number(duration || 0) - offsetMs) / 1000;
@@ -1007,6 +1140,16 @@ function App() {
         set currentTime(_) {},
         get volume() { return gain.gain.value; },
         set volume(value) { gain.gain.value = Math.max(0, Math.min(1, Number(value) || 0)); },
+        setSequenceLoopMetadata(metadata) {
+          configureSequenceLoop(metadata);
+        },
+        setLoopEnabled(value) {
+          loopRequested = !!value;
+          loopEnabled = loopRequested && loopFrameCount > 0;
+          if (loopEnabled && loopSource) loopSource.loop = true;
+          if (loopEnabled && readingFinished) installSequenceLoop();
+          if (!loopEnabled && loopSource) loopSource.loop = false;
+        },
         play() {
           if (closed) return Promise.reject(new Error("Audio context is closed"));
           return context.resume();
@@ -1024,10 +1167,17 @@ function App() {
             source.disconnect();
           }
           sources.clear();
+          if (loopSource) {
+            try { loopSource.stop(); } catch (_) {}
+            loopSource.disconnect();
+            loopSource = null;
+          }
           gain.disconnect();
           context.close().catch(() => {});
         },
       };
+
+      configureSequenceLoop(sequencePlayback);
 
       consumePcm(preamble.subarray(wav.dataOffset));
       preamble = null;
@@ -1036,6 +1186,7 @@ function App() {
         if (part.done) {
           consumePcm(new Uint8Array(0), true);
           readingFinished = true;
+          installSequenceLoop();
           break;
         }
         consumePcm(part.value);
@@ -1084,12 +1235,17 @@ function App() {
           if (closed) return;
           consumePcm(new Uint8Array(0), true);
           readingFinished = true;
+          // The normal pump path is how every non-trivial sequence finishes
+          // buffering. Install the captured loop before the last scheduled
+          // PCM source ends, so the first wrap stays on the same AudioContext
+          // timeline instead of falling back to a new HTTP/renderer request.
+          installSequenceLoop();
           const exactTotal = offsetMs + Math.round(scheduledFrames * 1000 / wav.sampleRate);
           if (isCurrent()) {
             setDurationMs(exactTotal);
             setPlayingSound((current) => current ? { ...current, durationMs: exactTotal } : current);
           }
-          if (lastSource && nextStartTime <= context.currentTime) finishPlayback();
+          if (lastSource && nextStartTime <= context.currentTime && !loopSource) finishPlayback();
         } catch (error) {
           if (closed || error?.name === "AbortError" || failureHandled) return;
           failureHandled = true;
@@ -1821,6 +1977,34 @@ function App() {
     setStrmPlaybackBySound(next);
     return nextValue;
   }
+  function setSeqPlayback(soundId, patch) {
+    const current = seqPlaybackBySoundRef.current[soundId] || {};
+    const nextValue = { ...current, ...patch };
+    const next = { ...seqPlaybackBySoundRef.current, [soundId]: nextValue };
+    seqPlaybackBySoundRef.current = next;
+    setSeqPlaybackBySound(next);
+    return nextValue;
+  }
+  function applySeqPlaybackMetadata(soundId, metadata) {
+    if (!metadata) return seqPlaybackBySoundRef.current[soundId] || {};
+    const current = seqPlaybackBySoundRef.current[soundId] || {};
+    const looped = !!metadata.looped;
+    const loopEnabled = looped && !!current.loopEnabled && !soundListAutoPlayEnabledRef.current;
+    const next = setSeqPlayback(soundId, {
+      loading: false,
+      looped,
+      loopStartMs: Math.max(0, Number(metadata.loopStartMs) || 0),
+      loopEndMs: Math.max(0, Number(metadata.loopEndMs) || 0),
+      loopStartFrame: Math.max(0, Number(metadata.loopStartFrame) || 0),
+      loopEndFrame: Math.max(0, Number(metadata.loopEndFrame) || 0),
+      sampleRate: Math.max(1, Number(metadata.sampleRate) || 32000),
+      loopEnabled,
+    });
+    if (audioRef.current?.sequenceSoundId === soundId) {
+      audioRef.current.setSequenceLoopMetadata?.(next);
+    }
+    return next;
+  }
   function applyStrmPlaybackMetadata(soundId, metadata) {
     const tracks = Array.isArray(metadata?.tracks) ? metadata.tracks : [];
     const current = strmPlaybackBySoundRef.current[soundId] || {};
@@ -1869,6 +2053,19 @@ function App() {
       setPlayheadMs(Math.round(audioRef.current.currentTime * 1000));
     }
   }
+  function changeSeqLoop(loopEnabled) {
+    const sound = playingSoundRef.current || playingSound;
+    if (!sound || sound.type !== "SEQ") return;
+    const current = seqPlaybackBySoundRef.current[sound.id] || {};
+    if (!current.looped) return;
+    const enabled = !!loopEnabled;
+    setSeqPlayback(sound.id, { loopEnabled: enabled });
+    if (enabled) {
+      soundListAutoPlayEnabledRef.current = false;
+      setSoundListAutoPlayEnabled(false);
+    }
+    audioRef.current?.setLoopEnabled?.(enabled);
+  }
   function changeStrmTrackSelection(selectedTrackIndices) {
     if (!playingSound || playingSound.type !== "STRM") return;
     const current = strmPlaybackBySoundRef.current[playingSound.id] || {};
@@ -1897,6 +2094,11 @@ function App() {
       if (audioRef.current?.isWebAudioLoop || audioRef.current?.isProgressiveStrmLoop) {
         setPlayheadMs(Math.round(audioRef.current.currentTime * 1000));
       }
+    }
+    const sequencePlayback = sound.type === "SEQ" ? (seqPlaybackBySoundRef.current[sound.id] || {}) : null;
+    if (enabled && sequencePlayback?.loopEnabled) {
+      setSeqPlayback(sound.id, { loopEnabled: false });
+      audioRef.current?.setLoopEnabled?.(false);
     }
   }
   function sequenceVariationFor(sound) {
@@ -1939,6 +2141,9 @@ function App() {
     durationTargetRef.current = transportSound.id;
     const currentDuration = transportSound.durationMs || (playingSound?.id === transportSound.id ? durationMs : 0);
     playingSoundRef.current = transportSound;
+    if (transportSound.type === "SEQ" && !seqPlaybackBySoundRef.current[transportSound.id]) {
+      setSeqPlayback(transportSound.id, { loading: true, looped: false, loopEnabled: false });
+    }
     setPlayingSound(transportSound);
     setPlayingId(s.id);
     setPlayheadMs(offsetMs);
@@ -1962,6 +2167,9 @@ function App() {
       return;
     }
     if (requestId !== playRequestRef.current) return;
+    if (transportSound.type === "SEQ" && result.seqPlayback) {
+      applySeqPlaybackMetadata(transportSound.id, result.seqPlayback);
+    }
     if (transportSound.type === "STRM" && result.strmPlayback) {
       applyStrmPlaybackMetadata(transportSound.id, result.strmPlayback);
     }
@@ -1989,6 +2197,13 @@ function App() {
         } else {
           play(transportSound, loopStartMs, true, playback.selectedTrackIndices);
         }
+      } else if (
+        transportSound.type === "SEQ"
+        && seqPlaybackBySoundRef.current[transportSound.id]?.looped
+        && seqPlaybackBySoundRef.current[transportSound.id]?.loopEnabled
+      ) {
+        const sequencePlayback = seqPlaybackBySoundRef.current[transportSound.id];
+        play(transportSound, sequencePlayback.loopStartMs || 0, true);
       } else {
         if (
           soundListAutoPlayEnabledRef.current
@@ -2043,6 +2258,8 @@ function App() {
           attachAudio(result.url, streamDuration, offsetMs, performance.now(), handlePlaybackEnded);
         },
         t1,
+        seqPlaybackBySoundRef.current[transportSound.id] || null,
+        transportSound.id,
       );
       if (attached || requestId !== playRequestRef.current) return;
     }
@@ -2101,6 +2318,9 @@ function App() {
     }
     const variation = sequenceVariationFor(s);
     const transportSound = variation ? { ...s, seqVariation: variation } : s;
+    if (transportSound.type === "SEQ" && !seqPlaybackBySoundRef.current[transportSound.id]) {
+      setSeqPlayback(transportSound.id, { loading: true, looped: false, loopEnabled: false });
+    }
     playingSoundRef.current = transportSound;
     playRequestRef.current += 1;
     strmTrackTransitionRef.current = null;
@@ -2126,6 +2346,7 @@ function App() {
       if (durationRequestId !== durationRequestRef.current) return;
       if (durationTargetRef.current !== transportSound.id) return;
       if (!result?.ok) return;
+      if (result.seqPlayback) applySeqPlaybackMetadata(transportSound.id, result.seqPlayback);
       const nextDuration = Math.max(0, Math.round(result.durationMs || 0));
       setDurationMs(nextDuration);
       setPlayingSound((current) => {
@@ -2401,6 +2622,8 @@ function App() {
     seqVariationsBySoundRef.current = {};
     seqVariationLoadsRef.current.clear();
     setSeqVariationsBySound({});
+    seqPlaybackBySoundRef.current = {};
+    setSeqPlaybackBySound({});
     setHistory([initial]);
     setHistoryIndex(0);
     setTweak("showWelcome", false);
@@ -2464,6 +2687,8 @@ function App() {
     seqVariationLoadsRef.current.clear();
     seqVariationsBySoundRef.current = {};
     setSeqVariationsBySound({});
+    seqPlaybackBySoundRef.current = {};
+    setSeqPlaybackBySound({});
     setArchive(data.archive);
     if (data.archive) setSafeMode(data.archive.safeMode !== false);
     setDataRevision((revision) => revision + 1);
@@ -3590,6 +3815,7 @@ function App() {
         durationMs={durationMs}
         volume={volume}
         strmPlayback={playingSound?.type === "STRM" ? strmPlaybackBySound[playingSound.id] : null}
+        seqPlayback={playingSound?.type === "SEQ" ? seqPlaybackBySound[playingSound.id] : null}
         autoPlayEnabled={soundListAutoPlayEnabled}
         seqVariations={playingSound?.type === "SEQ" ? seqVariationsBySound[playingSound.id] : null}
         onPlay={resumeCurrent}
@@ -3599,6 +3825,7 @@ function App() {
         onNext={nextTransportSound}
         onVolume={changeVolume}
         onStrmLoopChange={changeStrmLoop}
+        onSeqLoopChange={changeSeqLoop}
         onAutoPlayChange={changeSoundListAutoPlay}
         onStrmTrackSelectionChange={changeStrmTrackSelection}
         onSeqVariationChange={(variation) => chooseSeqVariation(playingSound, variation)}
