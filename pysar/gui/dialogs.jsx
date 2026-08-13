@@ -35,6 +35,11 @@ function pysarConfirm(message, options = {}) {
   return pysarDialogController.request("confirm", message, options);
 }
 
+function pysarConsequence(message, options = {}) {
+  const model = window.PysarNormalizeConsequenceOptions(options);
+  return pysarDialogController.request("consequence", message, model);
+}
+
 function pysarPrompt(title, initialValue = "", options = {}) {
   return pysarDialogController.request("prompt", options.message || "", {
     ...options,
@@ -49,9 +54,42 @@ function pysarAlert(message, options = {}) {
 
 function ModalOverlay({ children, onClose, title, width = 520 }) {
   const titleId = React.useId();
+  const dialogRef = useRefD(null);
+  useEffectD(() => {
+    const previous = document.activeElement;
+    const dialog = dialogRef.current;
+    const focusable = () => Array.from(dialog?.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ) || []);
+    const preferred = dialog?.querySelector("[autofocus]") || focusable()[0];
+    preferred?.focus();
+    const trapFocus = (event) => {
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      if (!items.length) {
+        event.preventDefault();
+        dialog?.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    dialog?.addEventListener("keydown", trapFocus);
+    return () => {
+      dialog?.removeEventListener("keydown", trapFocus);
+      if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
+    };
+  }, []);
   return (
     <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="modal-dialog" style={{ width }} role="dialog" aria-modal="true" aria-labelledby={titleId}>
+      <div ref={dialogRef} className="modal-dialog" style={{ width, maxWidth: "calc(100vw - 32px)" }} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
         <div className="modal-header">
           <span className="modal-title" id={titleId}>{title}</span>
           <button className="modal-close" onClick={onClose} aria-label="Close dialog">✕</button>
@@ -65,6 +103,8 @@ function ModalOverlay({ children, onClose, title, width = 520 }) {
 function PysarDialogHost() {
   const [queue, setQueue] = useStateD([]);
   const [promptValue, setPromptValue] = useStateD("");
+  const [consequenceAction, setConsequenceAction] = useStateD("");
+  const [consequenceSelections, setConsequenceSelections] = useStateD({});
   const active = queue[0] || null;
 
   useEffectD(() => pysarDialogController.attach((item) => {
@@ -73,6 +113,10 @@ function PysarDialogHost() {
 
   useEffectD(() => {
     if (active?.kind === "prompt") setPromptValue(active.options.initialValue || "");
+    if (active?.kind === "consequence") {
+      setConsequenceAction(active.options.initialAction);
+      setConsequenceSelections(window.PysarInitialConsequenceSelections(active.options));
+    }
   }, [active?.id]);
 
   useEffectD(() => {
@@ -80,7 +124,7 @@ function PysarDialogHost() {
     const onKeyDown = (event) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      finish(active.kind === "confirm" ? false : (active.kind === "prompt" ? null : undefined));
+      finish(active.kind === "confirm" ? false : (active.kind === "prompt" || active.kind === "consequence" ? null : undefined));
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -94,11 +138,109 @@ function PysarDialogHost() {
 
   if (!active) return null;
   const options = active.options || {};
-  const cancelValue = active.kind === "confirm" ? false : (active.kind === "prompt" ? null : undefined);
+  const cancelValue = active.kind === "confirm" ? false : (active.kind === "prompt" || active.kind === "consequence" ? null : undefined);
   const title = options.title || (active.kind === "alert" ? "Notice" : "Confirm action");
 
+  if (active.kind === "consequence") {
+    const selectedAction = options.actions.find((action) => action.id === consequenceAction) || options.actions[0];
+    const rows = window.PysarConsequenceRowsForAction(options, selectedAction.id);
+    const selectedValue = consequenceSelections[selectedAction.id] ?? "";
+    const selectionValid = !selectedAction.selection?.required || !!selectedValue;
+    const finishConsequence = () => {
+      if (!selectionValid) return;
+      finish(window.PysarConsequenceResult(options, selectedAction.id, consequenceSelections));
+    };
+    return (
+      <ModalOverlay key={active.id} title={title} width={options.width} onClose={() => finish(null)}>
+        <form className="dialog-form consequence-dialog" onSubmit={(event) => {
+          event.preventDefault();
+          finishConsequence();
+        }}>
+          {active.message && <div className="system-dialog-message">{active.message}</div>}
+          <fieldset className="consequence-strategies">
+            <legend>Choose how to proceed</legend>
+            {options.actions.map((action) => (
+              <label key={action.id} className={`consequence-strategy ${action.id === selectedAction.id ? "selected" : ""}`}>
+                <input
+                  type="radio"
+                  name={`consequence-action-${active.id}`}
+                  value={action.id}
+                  checked={action.id === selectedAction.id}
+                  onChange={() => setConsequenceAction(action.id)}
+                />
+                <span className={`consequence-strategy-indicator tone-${action.tone}`}></span>
+                <span className="consequence-strategy-copy">
+                  <strong>{action.label}</strong>
+                  {action.description && <small>{action.description}</small>}
+                </span>
+              </label>
+            ))}
+          </fieldset>
+          {selectedAction.selection && (
+            <div className="dialog-field consequence-selection">
+              <label>{selectedAction.selection.label}</label>
+              <select
+                value={selectedValue}
+                onChange={(event) => setConsequenceSelections((current) => ({
+                  ...current,
+                  [selectedAction.id]: event.target.value,
+                }))}
+              >
+                {!selectedValue && <option value="" disabled>Choose an option</option>}
+                {selectedAction.selection.options.map((option) => (
+                  <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>
+                ))}
+              </select>
+              {selectedAction.selection.options.find((option) => option.value === selectedValue)?.description && (
+                <span className="dialog-hint">
+                  {selectedAction.selection.options.find((option) => option.value === selectedValue).description}
+                </span>
+              )}
+            </div>
+          )}
+          {rows.length > 0 && (
+            <section className="consequence-table-block" aria-live="polite">
+              <div className="consequence-table-title">{options.caption}</div>
+              <div className="consequence-table-scroll">
+                <table className="consequence-table">
+                  <thead><tr><th>Resource</th><th>Result</th></tr></thead>
+                  <tbody>
+                    {rows.map((row) => (
+                      <tr key={row.id}>
+                        <td>
+                          <span className="consequence-resource">
+                            <span className={`type-pill type-${row.resource.badge}`}>{row.resource.badge}</span>
+                            <span><strong>{row.resource.name}</strong>{row.resource.detail && <small>{row.resource.detail}</small>}</span>
+                          </span>
+                        </td>
+                        <td>
+                          <span className={`consequence-outcome status-${row.outcome.status}`}>
+                            <strong>{row.outcome.text}</strong>
+                            {row.outcome.detail && <small>{row.outcome.detail}</small>}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+          <div className="dialog-actions">
+            <button type="button" className="tb-btn" onClick={() => finish(null)}>{options.cancelLabel}</button>
+            <button
+              type="submit"
+              disabled={!selectionValid}
+              className={`tb-btn ${selectedAction.tone === "danger" ? "danger" : "primary"}`}
+            >{selectedAction.confirmLabel}</button>
+          </div>
+        </form>
+      </ModalOverlay>
+    );
+  }
+
   return (
-    <ModalOverlay title={title} width={options.width || 440} onClose={() => finish(cancelValue)}>
+    <ModalOverlay key={active.id} title={title} width={options.width || 440} onClose={() => finish(cancelValue)}>
       <form className="dialog-form system-dialog" onSubmit={(event) => {
         event.preventDefault();
         finish(active.kind === "prompt" ? promptValue : true);
@@ -1339,6 +1481,7 @@ Object.assign(window, {
   ModalOverlay,
   PysarDialogHost,
   pysarAlert,
+  pysarConsequence,
   pysarConfirm,
   pysarPrompt,
   AddSoundDialog,
