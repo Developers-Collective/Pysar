@@ -69,6 +69,22 @@ class BrsarReader(ReaderBase):
             data, base_offset + info_off, offset_to_id,
         )
 
+        self._recover_info_referenced_files(
+            data,
+            base_offset=base_offset,
+            file_block_offset=base_offset + file_off,
+            file_block_size=file_size,
+            group_entries=group_entries,
+            embedded_files=embedded_files,
+            offset_to_id=offset_to_id,
+            id_to_offset=id_to_offset,
+        )
+        self._reconcile_group_file_ids(
+            group_entries,
+            offset_to_id,
+            base_offset=base_offset,
+        )
+
         provenance = read_trailer(
             data,
             base_offset=base_offset,
@@ -171,6 +187,133 @@ class BrsarReader(ReaderBase):
                     break
 
         return embedded_files, offset_to_id, id_to_offset
+
+    @staticmethod
+    def _info_referenced_allocations(
+        group_entries: list[GroupDataEntry],
+        *,
+        base_offset: int,
+    ) -> dict[int, int]:
+        allocations: dict[int, int] = {}
+
+        def add(relative_offset: int, size: int) -> None:
+            relative_offset = int(relative_offset)
+            size = int(size)
+            if relative_offset <= 0 or size <= 0:
+                return
+            absolute_offset = int(base_offset) + relative_offset
+            previous = allocations.get(absolute_offset)
+            if previous is None or size < previous:
+                allocations[absolute_offset] = size
+
+        for group in group_entries:
+            # Preserve groups without a usable subtable as well as the common
+            # case where these duplicate the first data/audio sub-entry.
+            add(group.group_file_offset, group.group_file_size)
+            add(group.group_audio_offset, group.group_audio_size)
+            for entry in group.group_table:
+                if entry.file_data_size > 0:
+                    add(
+                        group.group_file_offset + entry.file_data_offset,
+                        entry.file_data_size,
+                    )
+                if entry.audio_data_size > 0:
+                    add(
+                        group.group_audio_offset + entry.audio_data_offset,
+                        entry.audio_data_size,
+                    )
+        return allocations
+
+    def _recover_info_referenced_files(
+        self,
+        data: BinaryIO,
+        *,
+        base_offset: int,
+        file_block_offset: int,
+        file_block_size: int,
+        group_entries: list[GroupDataEntry],
+        embedded_files: dict[int, EmbeddedFile],
+        offset_to_id: dict[int, int],
+        id_to_offset: dict[int, int],
+    ) -> None:
+        section_start = int(file_block_offset)
+        section_end = section_start + max(0, int(file_block_size))
+        allocations = self._info_referenced_allocations(
+            group_entries,
+            base_offset=base_offset,
+        )
+        next_file_id = max(embedded_files, default=-1) + 1
+
+        for origin, allocation_size in sorted(allocations.items()):
+            if origin in offset_to_id:
+                continue
+            if origin < section_start or origin + 16 > section_end:
+                continue
+            try:
+                data.seek(origin)
+                header = read_file_header(data)
+            except (OSError, UnicodeDecodeError, struct.error):
+                continue
+            declared_size = int(header.file_size)
+            if declared_size < 16 or declared_size > allocation_size:
+                continue
+            if origin + declared_size > section_end:
+                continue
+            if int(header.byte_order) not in (0xFEFF, 0xFFFE):
+                continue
+
+            data.seek(origin)
+            raw = data.read(declared_size)
+            if len(raw) != declared_size:
+                continue
+            embedded_files[next_file_id] = EmbeddedFile(
+                file_id=next_file_id,
+                offset=origin,
+                raw_data=raw,
+                magic=header.magic,
+            )
+            offset_to_id[origin] = next_file_id
+            id_to_offset[next_file_id] = origin
+            next_file_id += 1
+
+    @staticmethod
+    def _reconcile_group_file_ids(
+        group_entries: list[GroupDataEntry],
+        offset_to_id: dict[int, int],
+        *,
+        base_offset: int,
+    ) -> None:
+        base_offset = int(base_offset)
+        for group in group_entries:
+            group.file_id = (
+                offset_to_id.get(base_offset + int(group.group_file_offset))
+                if group.group_file_offset
+                else None
+            )
+            group.audio_file_id = (
+                offset_to_id.get(base_offset + int(group.group_audio_offset))
+                if group.group_audio_offset
+                else None
+            )
+            for entry in group.group_table:
+                entry.file_id = (
+                    offset_to_id.get(
+                        base_offset
+                        + int(group.group_file_offset)
+                        + int(entry.file_data_offset)
+                    )
+                    if group.group_file_offset and entry.file_data_size > 0
+                    else None
+                )
+                entry.audio_file_id = (
+                    offset_to_id.get(
+                        base_offset
+                        + int(group.group_audio_offset)
+                        + int(entry.audio_data_offset)
+                    )
+                    if group.group_audio_offset and entry.audio_data_size > 0
+                    else None
+                )
 
     # ------------------------------------------------------------------
     # SYMB block
