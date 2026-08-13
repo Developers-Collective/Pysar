@@ -46,6 +46,13 @@
     return !sound?.kind && ["STRM", "SEQ", "WAVE"].includes(sound?.type);
   }
 
+  function shouldPreserveSoundTransport(activeSound, requestedSound, isPlaying) {
+    if (!isPlaying || !isSoundListTransport(activeSound) || !isSoundListTransport(requestedSound)) {
+      return false;
+    }
+    return Number(activeSound.id) === Number(requestedSound.id);
+  }
+
   class ProgressiveLoopClock {
     constructor(sampleRate, startFrame, loopStartFrame, totalFrames, contextStartTime) {
       this.sampleRate = Math.max(1, Math.trunc(Number(sampleRate) || 1));
@@ -91,4 +98,5 @@
   global.PysarStrmTrackSelection = normalizeStrmTrackSelection;
   global.PysarNextVisibleSoundId = nextVisibleSoundId;
   global.PysarIsSoundListTransport = isSoundListTransport;
+  global.PysarShouldPreserveSoundTransport = shouldPreserveSoundTransport;
 })(typeof window !== "undefined" ? window : globalThis);

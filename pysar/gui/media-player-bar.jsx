@@ -277,16 +277,19 @@ function MediaPlayerBar({ playingSound, playingId, isPlaying, playheadMs, durati
               <TP.Volume />
             </button>
             {volumeOpen && (
-              <div className="volume-pop">
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.01"
-                  value={volume}
-                  onChange={(e) => onVolume(parseFloat(e.target.value))}
-                  orient="vertical"
-                />
+              <div className="volume-pop" role="group" aria-label="Volume">
+                <div className="volume-slider-shell">
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={volume}
+                    onChange={(e) => onVolume(parseFloat(e.target.value))}
+                    aria-label="Volume level"
+                    style={{ "--volume-level": `${Math.round(volume * 100)}%` }}
+                  />
+                </div>
                 <span>{Math.round(volume * 100)}</span>
               </div>
             )}

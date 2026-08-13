@@ -1074,6 +1074,8 @@ body.resizing-column * {
 .transport {
   --tp-accent: var(--accent);
   --tp-accent-2: var(--accent-hover);
+  position: relative;
+  z-index: 40;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1294,31 +1296,76 @@ body.resizing-column * {
 .volume-pop-wrap { position: relative; display: inline-flex; }
 .volume-pop {
   position: absolute;
+  z-index: 100;
   right: 0;
   bottom: calc(100% + 10px);
-  width: 44px;
-  height: 138px;
-  padding: 10px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--bg-panel);
-  box-shadow: var(--shadow-md);
+  width: 52px;
+  height: 142px;
+  padding: 12px 9px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
+  isolation: isolate;
+}
+.volume-slider-shell {
+  position: relative;
+  width: 24px;
+  height: 96px;
+  flex: 0 0 96px;
 }
 .volume-pop input[type="range"] {
-  writing-mode: vertical-rl;
-  direction: rtl;
-  width: 22px;
-  height: 90px;
-  accent-color: var(--tp-accent);
+  -webkit-appearance: none;
+  appearance: none;
+  position: absolute;
+  top: 38px;
+  left: -36px;
+  width: 96px;
+  height: 20px;
+  margin: 0;
+  transform: rotate(-90deg);
+  transform-origin: center;
+  background: transparent;
+  cursor: pointer;
+}
+.volume-pop input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border: 1px solid color-mix(in oklab, var(--tp-accent) 22%, var(--border));
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--tp-accent) 0 var(--volume-level),
+    color-mix(in oklab, var(--tp-accent) 16%, var(--bg-input)) var(--volume-level) 100%
+  );
+}
+.volume-pop input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -7px;
+  border: 2px solid var(--bg-elevated);
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--tp-accent-2), var(--tp-accent));
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--tp-accent) 42%, var(--border)),
+    0 3px 8px color-mix(in oklab, var(--tp-accent) 32%, transparent);
+}
+.volume-pop input[type="range"]:focus-visible::-webkit-slider-thumb {
+  box-shadow:
+    0 0 0 3px color-mix(in oklab, var(--tp-accent) 24%, transparent),
+    0 3px 8px color-mix(in oklab, var(--tp-accent) 32%, transparent);
 }
 .volume-pop span {
   font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-tertiary);
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
 }
 .volume-toggle.active {
   background: color-mix(in oklab, var(--tp-accent) 18%, transparent);

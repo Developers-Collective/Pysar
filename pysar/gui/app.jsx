@@ -2085,6 +2085,13 @@ function App() {
     stopBackendPlayback();
   }
   function queueSoundForPreview(s) {
+    if (window.PysarShouldPreserveSoundTransport?.(
+      playingSoundRef.current,
+      s,
+      isPlaying,
+    )) {
+      return;
+    }
     const variation = sequenceVariationFor(s);
     const transportSound = variation ? { ...s, seqVariation: variation } : s;
     playingSoundRef.current = transportSound;
