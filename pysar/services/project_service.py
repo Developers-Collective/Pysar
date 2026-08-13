@@ -1,6 +1,9 @@
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from pysar.core.format.rsar import Brsar
+from pysar.core.format.rsar.safety import ArchiveTransaction
 
 from pysar.services.errors import NoProjectOpenError, SaveFailedError
 from pysar.services.models import ProjectSession
@@ -47,6 +50,49 @@ class ProjectService:
 
     def clear_dirty(self, session: ProjectSession) -> None:
         session.dirty = False
+
+    @contextmanager
+    def archive_transaction(
+            self,
+            session: ProjectSession,
+            label: str,
+            *,
+            destructive: bool = False,
+            record_undo: bool = True,
+            round_trip: bool = True,
+    ) -> Iterator[Brsar]:
+        archive = self.require_archive(session)
+        previous_state = (
+            session.dirty,
+            session.destructive_operations_executed,
+            session.undo_snapshot,
+            session.undo_label,
+        )
+        transaction = ArchiveTransaction(
+            archive,
+            label=label,
+            round_trip=round_trip,
+        )
+        try:
+            with transaction as candidate:
+                yield candidate
+        except Exception:
+            (
+                session.dirty,
+                session.destructive_operations_executed,
+                session.undo_snapshot,
+                session.undo_label,
+            ) = previous_state
+            raise
+
+        if not transaction.changed:
+            return
+        session.dirty = True
+        if destructive:
+            session.destructive_operations_executed = True
+        if record_undo and transaction.snapshot is not None:
+            session.undo_snapshot = transaction.snapshot.raw
+            session.undo_label = str(label)
 
     @staticmethod
     def require_archive(session: ProjectSession) -> Brsar:
