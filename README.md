@@ -116,3 +116,7 @@ Pysar (c) 2026 made by
 [Nin0](https://github.com/N-I-N-0)
 
 Huge thanks to [RedStoneMatt](https://github.com/RedStoneMatt) for providing additional technical and mental (xD) help.
+
+## License
+
+Pysar is licensed under the [GNU General Public License v3.0 only](LICENSE).
