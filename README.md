@@ -119,4 +119,10 @@ Huge thanks to [RedStoneMatt](https://github.com/RedStoneMatt) for providing add
 
 ## License
 
-Pysar is licensed under the [GNU General Public License v3.0 only](LICENSE).
+Pysar is licensed under the [Mozilla Public License 2.0](LICENSE).
+
+## Third-party software
+
+Pysar includes React and ReactDOM 18.3.1 and Babel Standalone 7.29.0,
+which are distributed under the MIT License. See
+[third-party licenses](third_party_licenses/) for their complete notices.
