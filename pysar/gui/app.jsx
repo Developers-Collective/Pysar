@@ -332,6 +332,96 @@ function App() {
     }
   }, []);
 
+  async function findUnusedArchiveResources() {
+    if (!window.pysar || !archive) return false;
+    const scan = await window.pysar.call("scan_unused_archive_resources")
+      .catch((error) => ({ ok: false, error: String(error) }));
+    if (!scan?.ok) {
+      setOpenError(scan?.error || "Could not scan unused archive resources");
+      return false;
+    }
+    const resources = Array.isArray(scan.resources) ? scan.resources : [];
+    if (!resources.length) {
+      await window.pysarAlert("No unused archive resources were found.", {
+        title: "Unused archive resources",
+      });
+      return false;
+    }
+
+    const deletable = resources.filter((item) => !item.protected);
+    const protectedCount = resources.length - deletable.length;
+    if (!deletable.length) {
+      await window.pysarAlert(
+        `${resources.length} unused resource${resources.length === 1 ? " is" : "s are"} protected by Safe Mode. `
+          + "Disable Safe Mode manually and scan again if you intend to remove original archive data.",
+        { title: "Unused resources are protected" },
+      );
+      return false;
+    }
+
+    function resourceBadge(item) {
+      if (item.resourceType === "bank") return "BANK";
+      if (item.resourceType === "wave") return "BRWAV";
+      if (item.resourceType === "wsd-entry") return "RWSD";
+      if (item.resourceType === "embedded") return item.kind || "BIN";
+      return item.kind || "FILE";
+    }
+
+    const choice = await window.pysarConsequence(
+      `Delete ${deletable.length} unused archive resource${deletable.length === 1 ? "" : "s"}?`,
+      {
+        title: "Clean unused resources",
+        caption: "Reachability from live sounds",
+        actions: [{
+          id: "cleanup",
+          label: "Delete unused",
+          description: protectedCount
+            ? `${protectedCount} additional resource${protectedCount === 1 ? " is" : "s are"} protected and will be retained.`
+            : "Only resources unreachable from every live sound will be removed.",
+          confirmLabel: "Delete unused",
+          tone: "danger",
+        }],
+        resources: resources.map((item, index) => ({
+          id: `${item.resourceType}-${item.fileIndex ?? item.fileId ?? ""}-${item.id}-${index}`,
+          resource: {
+            badge: String(resourceBadge(item)).split(" ")[0].toUpperCase(),
+            name: item.name,
+          },
+          outcomes: {
+            cleanup: item.protected
+              ? { text: "Retained by Safe Mode", status: "retained" }
+              : { text: "Will be deleted", status: "deleted" },
+          },
+        })),
+      },
+    );
+    if (choice?.action !== "cleanup") return false;
+
+    const result = await window.pysar.call("delete_unused_archive_resources")
+      .catch((error) => ({ ok: false, error: String(error) }));
+    if (!result?.ok) {
+      setOpenError(result?.error || "Could not delete unused archive resources");
+      return false;
+    }
+    if (!result.dirty) return false;
+
+    stop();
+    setDirty(true);
+    if (result.data) handleDataRefresh(result.data);
+    setTabs((current) => {
+      const remaining = current.filter((item) => !["bank", "archive", "file"].includes(item.kind));
+      return remaining.some((item) => item.id === "all")
+        ? remaining
+        : [{ id: "all", kind: "view", view: "all", title: "All sounds" }, ...remaining];
+    });
+    setActiveTab("all");
+    setNavView(SOUND_NAV_BY_FILTER[soundFilter] || "all");
+    setSelectedItem(null);
+    setHistory([{ tabId: "all", navView: "all", soundFilter, selectedItem: null }]);
+    setHistoryIndex(0);
+    return true;
+  }
+
   useEffectA(() => {
     function onKey(event) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") {
@@ -4352,6 +4442,9 @@ function App() {
                   Delete Group…
                 </button>
                 <div className="menu-sep" />
+                <button className="menu-entry" onClick={() => { setMenuOpen(null); findUnusedArchiveResources(); }}>
+                  Find Unused Resources…
+                </button>
                 <button className="menu-entry" onClick={chooseArchiveDump} disabled={!!dumpStatus?.busy}>
                   {dumpStatus?.busy ? "Dumping Archive…" : "Dump Archive…"}
                 </button>

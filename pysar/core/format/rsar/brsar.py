@@ -2415,15 +2415,26 @@ class Brsar(EditorBase):
             return False
         if not self.is_new("file", file_index):
             return False
+        return self.discard_orphan_file(file_index)
+
+    def discard_orphan_file(self, file_index: int) -> bool:
+        file_index = int(file_index)
+        if not 0 <= file_index < len(self._data.file_entries):
+            return False
         if any(int(sound.file_index) == file_index for sound in self._data.sound_entries):
             return False
         if any(int(bank.file_index) == file_index for bank in self._data.bank_entries):
             return False
+        self.require_safe_mutation("deleting it", "file", file_index)
 
         matches: list[tuple[int, int, int | None, int | None]] = []
         for group_index, group in enumerate(self._data.group_entries):
             for sub_index, sub in enumerate(group.group_table):
                 if int(sub.group_index) == file_index:
+                    if self._safe_mode:
+                        self.require_safe_mutation(
+                            "deleting it", "group_item", group_index, file_index,
+                        )
                     matches.append((group_index, sub_index, sub.file_id, sub.audio_file_id))
         for group_index, sub_index, _, _ in sorted(
                 matches, key=lambda item: (item[0], item[1]), reverse=True,
@@ -2448,9 +2459,324 @@ class Brsar(EditorBase):
         file_entry.external_file_path = None
         file_entry.file_positions.clear()
         self._seq_cache.pop(file_index, None)
+        self._wave_war_cache.pop(file_index, None)
+        self._wsd_cache.pop(file_index, None)
         self.unregister_new("file", file_index, recursive=True)
         self._refresh_group_size_fields()
+        self.mark_dirty(DirtyFlags.DATA)
         return True
+
+    @staticmethod
+    def _file_entry_has_payload(entry: FileEntry) -> bool:
+        return bool(
+            entry.file_positions
+            or entry.external_file_path
+            or entry.file_size
+            or entry.wave_file_size
+        )
+
+    def _unused_file_description(self, file_index: int) -> dict[str, Any]:
+        entry = self._data.file_entries[file_index]
+        data_raw = self._resolve_file_raw(file_index)
+        audio_raw = self._resolve_audio_raw(file_index)
+        data_magic = data_raw[:4].decode("ascii", errors="replace") if data_raw else None
+        audio_magic = audio_raw[:4].decode("ascii", errors="replace") if audio_raw else None
+        kind = data_magic or audio_magic or (
+            "EXTERNAL" if entry.external_file_path else "FILE"
+        )
+        group_items = [
+            (group_index, file_index)
+            for group_index, group in enumerate(self._data.group_entries)
+            if any(int(sub.group_index) == file_index for sub in group.group_table)
+        ]
+        requires_unsafe = (
+            not self.is_new("file", file_index)
+            or any(not self.is_new("group_item", *identity) for identity in group_items)
+        )
+        return {
+            "resourceType": "file",
+            "id": file_index,
+            "fileIndex": file_index,
+            "name": f"{kind}_{file_index:04d}",
+            "kind": kind,
+            "size": int(entry.file_size) + int(entry.wave_file_size),
+            "protected": self._safe_mode and requires_unsafe,
+            "requiresUnsafe": requires_unsafe,
+        }
+
+    def list_unused_archive_resources(self) -> list[dict[str, Any]]:
+        from pysar.core.format.rbnk import Brbnk
+
+        resources: list[dict[str, Any]] = []
+        used_bank_ids = {
+            int(sound.sound_info.bank_index)
+            for sound in self._data.sound_entries
+            if (
+                sound.sound_type == SoundType.SEQ
+                and isinstance(sound.sound_info, SeqSoundInfo)
+                and 0 <= int(sound.sound_info.bank_index) < len(self._data.bank_entries)
+            )
+        }
+        used_files = {
+            int(sound.file_index)
+            for sound in self._data.sound_entries
+            if 0 <= int(sound.file_index) < len(self._data.file_entries)
+        }
+        used_files.update(
+            int(self._data.bank_entries[bank_index].file_index)
+            for bank_index in used_bank_ids
+            if 0 <= int(self._data.bank_entries[bank_index].file_index) < len(self._data.file_entries)
+        )
+        used_wsd_entries: dict[int, set[int]] = {}
+        for sound in self._data.sound_entries:
+            if (
+                sound.sound_type == SoundType.WAVE
+                and isinstance(sound.sound_info, WaveSoundInfo)
+            ):
+                used_wsd_entries.setdefault(int(sound.file_index), set()).add(
+                    int(sound.sound_info.wave_index)
+                )
+        retained_wsd_entries = {
+            file_index: set(indices)
+            for file_index, indices in used_wsd_entries.items()
+        }
+
+        for bank_index, bank in enumerate(self._data.bank_entries):
+            if bank_index in used_bank_ids:
+                continue
+            name = (
+                self._data.names[bank.file_name_index]
+                if 0 <= bank.file_name_index < len(self._data.names)
+                else f"BANK_{bank_index:04d}"
+            )
+            requires_unsafe = not self.is_new("bank", bank_index)
+            resources.append({
+                "resourceType": "bank",
+                "id": bank_index,
+                "name": name,
+                "kind": "RBNK",
+                "protected": self._safe_mode and requires_unsafe,
+                "requiresUnsafe": requires_unsafe,
+            })
+
+        for file_index, entry in enumerate(self._data.file_entries):
+            if file_index in used_files or not self._file_entry_has_payload(entry):
+                continue
+            resources.append(self._unused_file_description(file_index))
+
+        for file_index in sorted(used_files):
+            raw = self._resolve_file_raw(file_index)
+            if raw is None or raw[:4] != b"RWSD":
+                continue
+            wsd = Brwsd.from_bytes(raw)
+            used_entries = used_wsd_entries.get(file_index, set())
+            for entry_index in range(len(wsd)):
+                if entry_index in used_entries:
+                    continue
+                requires_unsafe = (
+                    not self.is_new("wsd_entry", file_index, entry_index)
+                    or any(
+                        not self.is_new("wsd_entry", file_index, later)
+                        for later in range(entry_index + 1, len(wsd))
+                    )
+                )
+                resources.append({
+                    "resourceType": "wsd-entry",
+                    "id": entry_index,
+                    "fileIndex": file_index,
+                    "name": f"RWSD_{file_index:04d} entry {entry_index}",
+                    "kind": "RWSD entry",
+                    "protected": self._safe_mode and requires_unsafe,
+                    "requiresUnsafe": requires_unsafe,
+                })
+                if self._safe_mode and requires_unsafe:
+                    retained_wsd_entries.setdefault(file_index, set()).add(entry_index)
+
+        seen_copy_sets: set[frozenset[int]] = set()
+        for candidate_id, embedded in sorted(self._data.embedded_files.items()):
+            if embedded.magic != "RWAR":
+                continue
+            copy_ids = frozenset(self._wave_archive_copy_ids(candidate_id))
+            if not copy_ids or copy_ids in seen_copy_sets:
+                continue
+            seen_copy_sets.add(copy_ids)
+            file_id = min(copy_ids)
+            logical_files = self._wave_archive_logical_files(file_id)
+            reachable_files = logical_files & used_files
+            if not reachable_files:
+                continue
+
+            used_waves: set[int] = set()
+            for logical_file in sorted(reachable_files):
+                raw = self._resolve_file_raw(logical_file)
+                if raw is None:
+                    continue
+                if raw[:4] == b"RBNK":
+                    used_waves.update(
+                        int(value) for value in Brbnk.from_bytes(raw).get_wave_indices()
+                    )
+                elif raw[:4] == b"RWSD":
+                    wsd = Brwsd.from_bytes(raw)
+                    for entry_index in retained_wsd_entries.get(logical_file, set()):
+                        if 0 <= entry_index < len(wsd):
+                            used_waves.update(
+                                int(note.wave_index) for note in wsd[entry_index].notes
+                            )
+
+            brwar = Brwar.from_bytes(self._data.embedded_files[file_id].raw_data)
+            for wave_index in range(len(brwar)):
+                if wave_index in used_waves:
+                    continue
+                requires_unsafe = any(
+                    not self.is_new("wave", logical_file, wave_index)
+                    for logical_file in logical_files
+                ) or any(
+                    any(
+                        not self.is_new("wave", logical_file, later)
+                        for later in range(wave_index + 1, len(brwar))
+                    )
+                    for logical_file in logical_files
+                )
+                resources.append({
+                    "resourceType": "wave",
+                    "id": wave_index,
+                    "fileId": file_id,
+                    "name": f"BRWAV #{wave_index} in RWAR_{file_id:04d}",
+                    "kind": "BRWAV",
+                    "size": len(brwar[wave_index].to_bytes()),
+                    "protected": self._safe_mode and requires_unsafe,
+                    "requiresUnsafe": requires_unsafe,
+                })
+        return resources
+
+    def delete_wsd_entries(self, file_index: int, entry_indices: list[int]) -> list[int]:
+        file_index = int(file_index)
+        raw = self._resolve_file_raw(file_index)
+        if raw is None or raw[:4] != b"RWSD":
+            raise BrsarError(f"Logical file {file_index} is not an RWSD")
+        wsd = Brwsd.from_bytes(raw)
+        requested = sorted(
+            set(int(value) for value in entry_indices),
+            reverse=True,
+        )
+        if any(not 0 <= index < len(wsd) for index in requested):
+            raise BrsarError("Invalid RWSD entry index")
+
+        live = {
+            int(sound.sound_info.wave_index)
+            for sound in self._data.sound_entries
+            if (
+                sound.sound_type == SoundType.WAVE
+                and isinstance(sound.sound_info, WaveSoundInfo)
+                and int(sound.file_index) == file_index
+            )
+        }
+        referenced = sorted(live & set(requested))
+        if referenced:
+            raise BrsarError(f"RWSD entry {referenced[0]} is still referenced by a sound")
+
+        deleted: list[int] = []
+        for entry_index in requested:
+            self.require_safe_mutation(
+                "deleting it", "wsd_entry", file_index, entry_index,
+            )
+            if self._safe_mode and any(
+                self.is_protected("wsd_entry", file_index, later)
+                for later in range(entry_index + 1, len(wsd))
+            ):
+                raise BrsarError(
+                    "Safe Mode cannot delete this RWSD entry because doing so "
+                    "would reindex a later original entry"
+                )
+            del wsd[entry_index]
+            for sound in self._data.sound_entries:
+                if (
+                    sound.sound_type == SoundType.WAVE
+                    and isinstance(sound.sound_info, WaveSoundInfo)
+                    and int(sound.file_index) == file_index
+                    and int(sound.sound_info.wave_index) > entry_index
+                ):
+                    sound.sound_info.wave_index -= 1
+            self.remap_child_provenance_after_delete(
+                "wsd_entry", (file_index,), entry_index,
+            )
+            deleted.append(entry_index)
+
+        if deleted:
+            self._update_all_file_copies(file_index, wsd.to_bytes(), expected_magic="RWSD")
+            self.clear_subfile_caches()
+            self.mark_dirty(DirtyFlags.DATA)
+        return sorted(deleted)
+
+    def delete_unused_archive_resources(self) -> list[dict[str, Any]]:
+        deleted: list[dict[str, Any]] = []
+        while True:
+            resources = [
+                item for item in self.list_unused_archive_resources()
+                if not bool(item["protected"])
+            ]
+            if not resources:
+                break
+
+            banks = [item for item in resources if item["resourceType"] == "bank"]
+            if banks:
+                pending_files = {
+                    int(item["fileIndex"]): item
+                    for item in resources
+                    if item["resourceType"] == "file"
+                }
+                for item in sorted(banks, key=lambda value: int(value["id"]), reverse=True):
+                    self.delete_bank(int(item["id"]))
+                    deleted.append(item)
+                deleted.extend(
+                    item for file_index, item in pending_files.items()
+                    if not self._file_entry_has_payload(self._data.file_entries[file_index])
+                )
+                continue
+
+            wsd_entries = [
+                item for item in resources if item["resourceType"] == "wsd-entry"
+            ]
+            if wsd_entries:
+                grouped: dict[int, list[int]] = {}
+                for item in wsd_entries:
+                    grouped.setdefault(int(item["fileIndex"]), []).append(int(item["id"]))
+                for logical_file, indices in sorted(grouped.items()):
+                    removed = set(self.delete_wsd_entries(logical_file, indices))
+                    deleted.extend(
+                        item for item in wsd_entries
+                        if int(item["fileIndex"]) == logical_file and int(item["id"]) in removed
+                    )
+                continue
+
+            files = [item for item in resources if item["resourceType"] == "file"]
+            if files:
+                progress = False
+                for item in files:
+                    if self.discard_orphan_file(int(item["fileIndex"])):
+                        deleted.append(item)
+                        progress = True
+                if progress:
+                    continue
+
+            waves = [item for item in resources if item["resourceType"] == "wave"]
+            if waves:
+                progress = False
+                grouped_waves: dict[int, list[dict[str, Any]]] = {}
+                for item in waves:
+                    grouped_waves.setdefault(int(item["fileId"]), []).append(item)
+                for file_id, items in sorted(grouped_waves.items()):
+                    for item in sorted(items, key=lambda value: int(value["id"]), reverse=True):
+                        wave_index = int(item["id"])
+                        if self.get_wave_archive_sample_references(file_id, wave_index):
+                            continue
+                        self.delete_wave_archive_sample(file_id, wave_index, None)
+                        deleted.append(item)
+                        progress = True
+                if progress:
+                    continue
+            break
+        return deleted
 
     def _validate_bank_name(
             self,

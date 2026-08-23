@@ -846,6 +846,97 @@ class PysarApi:
     def list_archives(self) -> list:
         return self._ui_data()["waveArchives"]
 
+    @staticmethod
+    def _removed_embedded_resources(
+            before: dict[int, str],
+            remaining_ids: set[int],
+            archive=None,
+    ) -> list[dict[str, Any]]:
+        resources = []
+        for file_id in sorted(set(before) - remaining_ids):
+            logical_files = (
+                archive.logical_file_indices_for_embedded(file_id)
+                if archive is not None else set()
+            )
+            requires_unsafe = not logical_files or any(
+                not archive.is_new("file", logical_file)
+                for logical_file in logical_files
+            )
+            resources.append({
+                "resourceType": "embedded",
+                "id": file_id,
+                "name": f"{before[file_id]}_{file_id:04d}",
+                "kind": before[file_id],
+                "protected": bool(
+                    archive is not None and archive.safe_mode and requires_unsafe
+                ),
+                "requiresUnsafe": requires_unsafe,
+            })
+        return resources
+
+    def scan_unused_archive_resources(self) -> dict:
+        """Preview the complete fixed-point orphan cleanup without mutation."""
+        try:
+            archive = self.project_service.require_archive(self.session)
+            from pysar.core.format.rsar import Brsar
+
+            preview = Brsar.from_bytes(archive.to_bytes())
+            preview.set_safe_mode(self.session.safe_mode)
+            before_embedded = {
+                int(file_id): embedded.magic
+                for file_id, embedded in preview.data.embedded_files.items()
+            }
+            resources = preview.delete_unused_archive_resources()
+            deleted_keys = {
+                (item.get("resourceType"), item.get("fileIndex"), item.get("fileId"), item.get("id"))
+                for item in resources
+            }
+            resources.extend(
+                item for item in preview.list_unused_archive_resources()
+                if (
+                    item.get("resourceType"), item.get("fileIndex"),
+                    item.get("fileId"), item.get("id"),
+                ) not in deleted_keys
+            )
+            resources.extend(self._removed_embedded_resources(
+                before_embedded,
+                set(preview.data.embedded_files),
+                archive,
+            ))
+            return {"ok": True, "resources": resources}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def delete_unused_archive_resources(self) -> dict:
+        """Transactionally delete currently unprotected archive orphans."""
+        try:
+            deleted: list[dict[str, Any]] = []
+            with self.project_service.archive_transaction(
+                self.session,
+                "Delete unused archive resources",
+                destructive=True,
+            ) as archive:
+                before_embedded = {
+                    int(file_id): embedded.magic
+                    for file_id, embedded in archive.data.embedded_files.items()
+                }
+                deleted = archive.delete_unused_archive_resources()
+                deleted.extend(self._removed_embedded_resources(
+                    before_embedded,
+                    set(archive.data.embedded_files),
+                    archive,
+                ))
+            if deleted:
+                self._clear_audio_streams()
+            return {
+                "ok": True,
+                "dirty": bool(deleted),
+                "deleted": deleted,
+                "data": self._ui_data(),
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def get_wave_archive_details(self, file_id: int) -> dict:
         try:
             details = self.archive_service.get_wave_archive_details(self.session, int(file_id))
