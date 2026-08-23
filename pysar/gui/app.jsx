@@ -128,6 +128,37 @@ function refreshedSelection(selection, data) {
   };
 }
 
+function refreshedTransportSelection(selection, data) {
+  if (!selection) return null;
+  // Wave-archive samples and virtual bank notes are transport-only objects;
+  // their identifying data is already self-contained.
+  if (selection.kind === "wave" || selection.kind === "bank_note") return selection;
+  const sound = (data?.sounds || []).find((item) => Number(item.id) === Number(selection.id));
+  if (!sound) return null;
+  return {
+    ...sound,
+    durationMs: Math.max(0, Number(selection.durationMs) || 0),
+    ...(selection.seqVariation ? { seqVariation: selection.seqVariation } : {}),
+  };
+}
+
+function dataWithSoundPatch(data, soundPatch) {
+  if (!data || !soundPatch || soundPatch.id == null) return data;
+  const soundId = Number(soundPatch.id);
+  const sounds = (data.sounds || []).map((sound) => (
+    Number(sound.id) === soundId ? { ...sound, ...soundPatch, id: sound.id } : sound
+  ));
+  const activeDocumentId = data.activeDocumentId || null;
+  return {
+    ...data,
+    archive: data.archive ? { ...data.archive, dirty: true } : data.archive,
+    documents: (data.documents || []).map((document) => (
+      document.id === activeDocumentId ? { ...document, dirty: true } : document
+    )),
+    sounds,
+  };
+}
+
 function selectedItemReference(selection) {
   if (!selection) return null;
   if (selection.kind === "wave") {
@@ -147,14 +178,85 @@ function selectedItemReference(selection) {
   return { kind: selection.kind, id: selection.id };
 }
 
+function AboutDialog({ appMeta, onClose, onError }) {
+  const nsmlwDiscordUrl = "https://discord.gg/4s72Nnm";
+  const openLink = async (url) => {
+    const result = await window.pysar?.call("open_external_url", url)
+      .catch((error) => ({ ok: false, error: String(error) }));
+    if (!result?.ok) onError?.(result?.error || "Could not open the link");
+  };
+  const openNsmlwDiscord = (event) => {
+    event.preventDefault();
+    openLink(nsmlwDiscordUrl);
+  };
+  return (
+    <ModalOverlay title="About" width={620} className="about-modal" onClose={onClose}>
+      <div className="about-content">
+        <div className="about-brand-row">
+          <img src="../../resources/logo/pysar.png" className="about-logo" alt="PYSAR" />
+          <div>
+            <div className="about-name">PYSAR</div>
+            <div className="about-version">Version {appMeta.displayVersion || appMeta.version}</div>
+          </div>
+        </div>
+        <p className="about-summary">An editor for Nintendo Wii BRSAR sound archives.</p>
+        <div className="about-credits">
+          <h3>Credits</h3>
+          <p>Made by Ogu99 and Nin0.</p>
+          <p>Special thanks to RedStoneMatt for additional technical help, and 0D for extensive testing and bug reports.</p>
+        </div>
+        <div className="about-community-card">
+          <a
+            href={nsmlwDiscordUrl}
+            className="about-community-logo-link"
+            onClick={openNsmlwDiscord}
+            title="Open the NSMLW Discord"
+            aria-label="Open the NSMLW Discord"
+          >
+            <img
+              src="../../resources/community/nsmlw-logo.png"
+              className="about-community-logo"
+              alt="New Super Mario Lost Worlds"
+            />
+          </a>
+          <div className="about-community-copy">
+            <div className="about-community-eyebrow">Community</div>
+            <div className="about-community-title">New Super Mario Lost Worlds</div>
+            <p>Used and powered by New Super Mario Lost Worlds!</p>
+            <a
+              href={nsmlwDiscordUrl}
+              className="about-community-link"
+              onClick={openNsmlwDiscord}
+              title="Open the NSMLW Discord"
+            >
+              Click here or the logo to join the Discord <span aria-hidden="true">↗</span>
+            </a>
+          </div>
+        </div>
+        <p className="about-disclaimer">This is an independent project and not affiliated with or endorsed by Nintendo.</p>
+        <div className="dialog-actions">
+          <button type="button" className="tb-btn primary" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </ModalOverlay>
+  );
+}
+
 function App() {
-  window.PYSAR_DATA = window.PYSAR_DATA || { archive: null, sounds: [], banks: [], groups: [], players: [], waveArchives: [], files: [] };
+  window.PYSAR_DATA = window.PYSAR_DATA || { archive: null, activeDocumentId: null, documents: [], sounds: [], banks: [], groups: [], players: [], waveArchives: [], files: [] };
   window.PYSAR_APP = window.PYSAR_APP || { name: "PYSAR - 1.0.0", version: "1.0.0", displayVersion: "1.0.0", phase: "Stable" };
   const D = window.PYSAR_DATA;
   const [tw, setTwState] = useStateA({ ...APPEARANCE });
   const setTweak = useCallbackA((key, value) => setTwState((prev) => ({ ...prev, [key]: value })), []);
 
   const [archive, setArchive] = useStateA(tw.showWelcome ? null : D.archive);
+  const [documents, setDocuments] = useStateA(Array.isArray(D.documents) ? D.documents : []);
+  const [activeDocumentId, setActiveDocumentId] = useStateA(D.activeDocumentId || null);
+  const activeDocumentIdRef = React.useRef(activeDocumentId);
+  activeDocumentIdRef.current = activeDocumentId;
+  const archiveWorkspacesRef = React.useRef({});
+  const archiveDataByDocumentRef = React.useRef({});
+  const currentWorkspaceRef = React.useRef(null);
   const [appMeta, setAppMeta] = useStateA(window.PYSAR_APP);
   const [openErrorToast, setOpenErrorToast] = useStateA(null);
   const [errorToastHovered, setErrorToastHovered] = useStateA(false);
@@ -169,6 +271,7 @@ function App() {
     });
   }, []);
   const [loadingArchive, setLoadingArchive] = useStateA(false);
+  const archiveActivationRef = React.useRef(false);
   const [recentArchives, setRecentArchives] = useStateA([]);
   const [navView, setNavView] = useStateA("all"); // sidebar selection
   const [soundFilter, setSoundFilter] = useStateA("ALL");
@@ -193,16 +296,20 @@ function App() {
   const [replaceWaveTarget, setReplaceWaveTarget] = useStateA(null);
   const [unsavedAction, setUnsavedAction] = useStateA(null);
   const [unsavedBusy, setUnsavedBusy] = useStateA(false);
-  const [pendingRecentPath, setPendingRecentPath] = useStateA(null);
+  const [pendingCloseDocumentId, setPendingCloseDocumentId] = useStateA(null);
+  const [windowCloseInfo, setWindowCloseInfo] = useStateA(null);
   const [dumpOptionsOpen, setDumpOptionsOpen] = useStateA(false);
   const [dumpStatus, setDumpStatus] = useStateA(null);
   const [menuOpen, setMenuOpen] = useStateA(null);
+  const [showAbout, setShowAbout] = useStateA(false);
   const bankMutationRef = React.useRef(false);
 
   // playback state
   const [playingId, setPlayingId] = useStateA(null);
   const [playingSound, setPlayingSound] = useStateA(null);
   const [isPlaying, setIsPlaying] = useStateA(false);
+  const isPlayingRef = React.useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
   // The playhead changes up to twenty times per second.  Keep it outside the
   // root App state so a clock tick does not reconcile the complete archive UI.
   const playheadMsRef = React.useRef(window.PysarPlayheadStore.getSnapshot());
@@ -238,6 +345,33 @@ function App() {
   const seqPlaybackBySoundRef = React.useRef({});
   const seqVariationLoadsRef = React.useRef(new Set());
   const seqVariationRevisionRef = React.useRef(0);
+
+  const currentWorkspace = {
+    documentId: activeDocumentId,
+    tabs,
+    activeTab,
+    navView,
+    soundFilter,
+    selectedItem,
+    inspectorTab,
+    history,
+    historyIndex,
+    seqVariationBySound,
+    seqVariationsBySound,
+    seqPlaybackBySound,
+    seqEditorSourceBySound,
+    strmPlaybackBySound,
+    transportSound: playingSound,
+    transportDurationMs: durationMs,
+    transportPlayheadMs: playheadMsRef.current,
+  };
+  currentWorkspaceRef.current = currentWorkspace;
+  // Keep every archive's navigation state current instead of relying on a
+  // single snapshot taken at switch/close time. This also covers rapid close
+  // actions immediately after selecting a detail tab.
+  if (activeDocumentId) {
+    archiveWorkspacesRef.current[activeDocumentId] = currentWorkspace;
+  }
 
   const rememberVisibleSounds = useCallbackA((soundIds) => {
     visibleSoundIdsRef.current = Array.isArray(soundIds) ? soundIds : [];
@@ -477,6 +611,7 @@ function App() {
       const { type, payload } = e.detail || {};
       if (type === "window_close_requested") {
         setUnsavedBusy(false);
+        setWindowCloseInfo(payload || null);
         setUnsavedAction("window");
         return;
       }
@@ -943,10 +1078,13 @@ function App() {
     t0 = null,
     sequencePlayback = null,
     sequenceSoundId = null,
+    transitionOptions = null,
   ) {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass || !window.fetch) return false;
-    clearAudio();
+    const deferAudioHandoff = !!transitionOptions?.deferAudioHandoff && !!audioRef.current;
+    const previousAudio = deferAudioHandoff ? audioRef.current : null;
+    if (!deferAudioHandoff) clearAudio();
 
     const abortController = typeof AbortController === "function" ? new AbortController() : null;
     let reader = null;
@@ -1036,7 +1174,7 @@ function App() {
         context = new AudioContextClass();
       }
       const gain = context.createGain();
-      gain.gain.value = volume;
+      gain.gain.value = deferAudioHandoff ? 0 : volume;
       gain.connect(context.destination);
 
       const sources = new Set();
@@ -1054,6 +1192,9 @@ function App() {
       let failureHandled = false;
       const maxScheduleAheadSeconds = 2;
       const offsetFrame = Math.max(0, Math.round(offsetMs * wav.sampleRate / 1000));
+      let transitionDiscardedFrames = 0;
+      let playbackStartFrame = offsetFrame;
+      let playbackStartMs = offsetMs;
       const maxSequenceLoopBytes = 64 * 1024 * 1024;
       let loopStartFrame = 0;
       let loopEndFrame = 0;
@@ -1138,19 +1279,19 @@ function App() {
       function localPosition() {
         if (!started) return 0;
         const elapsedFrames = Math.max(0, Math.floor((context.currentTime - clockStartTime) * wav.sampleRate));
-        let absoluteFrame = offsetFrame + elapsedFrames;
+        let absoluteFrame = playbackStartFrame + elapsedFrames;
         if (loopSource && loopFrameCount > 0 && absoluteFrame >= loopEndFrame) {
           absoluteFrame = loopStartFrame + ((absoluteFrame - loopEndFrame) % loopFrameCount);
         } else {
-          absoluteFrame = Math.min(offsetFrame + scheduledFrames, absoluteFrame);
+          absoluteFrame = Math.min(playbackStartFrame + scheduledFrames, absoluteFrame);
         }
-        return (absoluteFrame - offsetFrame) / wav.sampleRate;
+        return (absoluteFrame - playbackStartFrame) / wav.sampleRate;
       }
       function finishPlayback() {
         if (closed || ended) return;
         ended = true;
         if (!isCurrent()) return;
-        const exactTotal = offsetMs + Math.round(scheduledFrames * 1000 / wav.sampleRate);
+        const exactTotal = playbackStartMs + Math.round(scheduledFrames * 1000 / wav.sampleRate);
         setDurationMs(exactTotal);
         setPlayingSound((current) => current ? { ...current, durationMs: exactTotal } : current);
         if (onEnded) onEnded(exactTotal);
@@ -1158,7 +1299,7 @@ function App() {
       function schedulePcm(bytes) {
         const frames = Math.floor(bytes.length / wav.blockAlign);
         if (!frames) return;
-        const absoluteStart = offsetFrame + scheduledFrames;
+        const absoluteStart = playbackStartFrame + scheduledFrames;
         if (!loopMetadataResolved && !pendingMetadataOverflow) {
           const copy = bytes.slice();
           if (pendingMetadataBytes + copy.length <= maxSequenceLoopBytes) {
@@ -1235,6 +1376,26 @@ function App() {
       }
       function consumePcm(bytes, flush = false) {
         pendingPcm = appendBytes(pendingPcm, bytes);
+        if (deferAudioHandoff && !started && audioRef.current === previousAudio) {
+          const previousAbsoluteMs = Math.max(
+            offsetMs,
+            audioBaseRef.current + Math.max(0, Number(previousAudio?.currentTime) || 0) * 1000,
+            playheadMsRef.current,
+          );
+          const targetDiscardedFrames = Math.max(
+            transitionDiscardedFrames,
+            Math.round((previousAbsoluteMs - offsetMs) * wav.sampleRate / 1000),
+          );
+          const neededFrames = targetDiscardedFrames - transitionDiscardedFrames;
+          const availableFrames = Math.floor(pendingPcm.length / wav.blockAlign);
+          const discardFrames = Math.min(neededFrames, availableFrames);
+          if (discardFrames > 0) {
+            pendingPcm = pendingPcm.slice(discardFrames * wav.blockAlign);
+            transitionDiscardedFrames += discardFrames;
+            playbackStartFrame = offsetFrame + transitionDiscardedFrames;
+            playbackStartMs = offsetMs + Math.round(transitionDiscardedFrames * 1000 / wav.sampleRate);
+          }
+        }
         while (true) {
           const batchFrames = started ? laterBatchFrames : firstBatchFrames;
           const availableFrames = Math.floor(pendingPcm.length / wav.blockAlign);
@@ -1253,7 +1414,7 @@ function App() {
         get isSequenceLoop() { return loopFrameCount > 0; },
         get ended() { return ended; },
         get duration() {
-          const known = Math.max(0, Number(duration || 0) - offsetMs) / 1000;
+          const known = Math.max(0, Number(duration || 0) - playbackStartMs) / 1000;
           return readingFinished ? scheduledFrames / wav.sampleRate : (known || scheduledFrames / wav.sampleRate);
         },
         get currentTime() { return localPosition(); },
@@ -1317,16 +1478,18 @@ function App() {
         return true;
       }
 
+      if (deferAudioHandoff) clearAudio();
       audioRef.current = adapter;
-      audioBaseRef.current = offsetMs;
+      gain.gain.value = volume;
+      audioBaseRef.current = playbackStartMs;
       setDurationMs(duration || 0);
-      setPlayheadMs(offsetMs);
+      setPlayheadMs(playbackStartMs);
       await adapter.play();
       if (adapter !== audioRef.current) return true;
       setIsPlaying(true);
       playheadTimerRef.current = window.setInterval(() => {
         if (adapter !== audioRef.current) return;
-        const absolute = offsetMs + Math.round(adapter.currentTime * 1000);
+        const absolute = playbackStartMs + Math.round(adapter.currentTime * 1000);
         setPlayheadMs(duration ? Math.min(duration, absolute) : absolute);
       }, 100);
 
@@ -1360,7 +1523,7 @@ function App() {
           // PCM source ends, so the first wrap stays on the same AudioContext
           // timeline instead of falling back to a new HTTP/renderer request.
           installSequenceLoop();
-          const exactTotal = offsetMs + Math.round(scheduledFrames * 1000 / wav.sampleRate);
+          const exactTotal = playbackStartMs + Math.round(scheduledFrames * 1000 / wav.sampleRate);
           if (isCurrent()) {
             setDurationMs(exactTotal);
             setPlayingSound((current) => current ? { ...current, durationMs: exactTotal } : current);
@@ -1369,7 +1532,7 @@ function App() {
         } catch (error) {
           if (closed || error?.name === "AbortError" || failureHandled) return;
           failureHandled = true;
-          const absolute = offsetMs + Math.round(localPosition() * 1000);
+          const absolute = playbackStartMs + Math.round(localPosition() * 1000);
           console.warn("Progressive PCM playback fallback:", error);
           if (adapter === audioRef.current && onStreamError) onStreamError(error, absolute);
         }
@@ -2249,7 +2412,7 @@ function App() {
     else queueSoundForPreview(nextSound);
     return true;
   }
-  async function play(s, offsetMs = 0, force = false, explicitStrmTrackIndices = null) {
+  async function play(s, offsetMs = 0, force = false, explicitStrmTrackIndices = null, playbackOptions = null) {
     // A direct playback request supersedes any pending authored-track jump.
     // playStrmTrackTransition installs its new token immediately afterwards.
     strmTrackTransitionRef.current = null;
@@ -2386,6 +2549,7 @@ function App() {
         t1,
         seqPlaybackBySoundRef.current[transportSound.id] || null,
         transportSound.id,
+        playbackOptions,
       );
       if (attached || requestId !== playRequestRef.current) return;
     }
@@ -2723,46 +2887,147 @@ function App() {
     }
   }
 
-  function acceptArchiveData(data, recent) {
+  function rememberActiveArchiveWorkspace() {
+    const workspace = currentWorkspaceRef.current;
+    const documentId = workspace?.documentId || activeDocumentIdRef.current;
+    if (!documentId || !workspace) return;
+    archiveWorkspacesRef.current[documentId] = {
+      ...workspace,
+      documentId,
+      transportPlayheadMs: playheadMsRef.current,
+    };
+    if (window.PYSAR_DATA?.activeDocumentId === documentId) {
+      archiveDataByDocumentRef.current[documentId] = window.PYSAR_DATA;
+    }
+  }
+
+  function archiveDataWithDocumentState(data, documentId, documentList) {
+    if (!data || !documentId) return null;
+    const nextDocuments = Array.isArray(documentList) ? documentList : [];
+    const activeDocument = nextDocuments.find((document) => document.id === documentId);
+    return {
+      ...data,
+      activeDocumentId: documentId,
+      documents: nextDocuments,
+      archive: data.archive ? {
+        ...data.archive,
+        dirty: Boolean(activeDocument?.dirty ?? data.archive.dirty),
+        safeMode: activeDocument?.safeMode !== false,
+      } : data.archive,
+    };
+  }
+
+  function refreshedWorkspace(workspace, data, documentId) {
+    if (!workspace || (workspace.documentId && workspace.documentId !== documentId)) return null;
+    const nextTabs = (workspace.tabs || []).map((tabItem) => {
+      if (tabItem.kind === "view" || !tabItem.item) return tabItem;
+      const item = refreshedDataItem(tabItem.kind, tabItem.item, data);
+      return item === tabItem.item
+        ? tabItem
+        : { ...tabItem, item, title: item.name || item.label || tabItem.title };
+    });
+    const validTabs = nextTabs.length
+      ? nextTabs
+      : [{ id: "all", kind: "view", view: "all", title: "All sounds" }];
+    const nextActiveTab = validTabs.some((tabItem) => tabItem.id === workspace.activeTab)
+      ? workspace.activeTab
+      : validTabs[0].id;
+    const activeRestoredTab = validTabs.find((tabItem) => tabItem.id === nextActiveTab);
+    const restoredSelection = refreshedSelection(workspace.selectedItem, data);
+    const tabSelection = activeRestoredTab?.kind !== "view" && activeRestoredTab?.item
+      ? {
+          kind: activeRestoredTab.kind,
+          id: activeRestoredTab.item.id,
+          name: activeRestoredTab.item.name || activeRestoredTab.item.label || activeRestoredTab.title,
+          item: activeRestoredTab.item,
+        }
+      : null;
+    return {
+      ...workspace,
+      documentId,
+      tabs: validTabs,
+      activeTab: nextActiveTab,
+      selectedItem: tabSelection || restoredSelection,
+      history: (workspace.history || []).map((entry) => ({
+        ...entry,
+        selectedItem: refreshedSelection(entry.selectedItem, data),
+      })),
+    };
+  }
+
+  function acceptArchiveData(data, recent, { rememberCurrent = true, refreshRecent = true } = {}) {
+    if (rememberCurrent) rememberActiveArchiveWorkspace();
     playRequestRef.current += 1;
+    durationRequestRef.current += 1;
     clearAudio();
+    stopBackendPlayback();
     window.PYSAR_DATA = data;
     setArchive(data.archive);
     setSafeMode(data.archive?.safeMode !== false);
+    const nextDocuments = Array.isArray(data.documents) ? data.documents : [];
+    const nextDocumentId = data.activeDocumentId || null;
+    if (nextDocumentId) archiveDataByDocumentRef.current[nextDocumentId] = data;
+    setDocuments(nextDocuments);
+    setActiveDocumentId(nextDocumentId);
+    activeDocumentIdRef.current = nextDocumentId;
+    const activeDocument = nextDocuments.find((document) => document.id === nextDocumentId);
+    setDirty(Boolean(activeDocument?.dirty ?? data.archive?.dirty));
     const initial = { tabId: "all", navView: "all", soundFilter: "ALL", selectedItem: null };
-    setTabs([{ id: "all", kind: "view", view: "all", title: "All sounds" }]);
-    setActiveTab("all");
-    setNavView("all");
-    setSoundFilter("ALL");
-    setSelectedItem(null);
-    playingSoundRef.current = null;
-    setPlayingSound(null);
+    const saved = nextDocumentId
+      ? refreshedWorkspace(archiveWorkspacesRef.current[nextDocumentId], data, nextDocumentId)
+      : null;
+    setTabs(saved?.tabs || [{ id: "all", kind: "view", view: "all", title: "All sounds" }]);
+    setActiveTab(saved?.activeTab || "all");
+    setNavView(saved?.navView || "all");
+    setSoundFilter(saved?.soundFilter || "ALL");
+    setSelectedItem(saved?.selectedItem || null);
+    setInspectorTab(saved?.inspectorTab || "props");
+    const transportCandidate = saved?.transportSound
+      || (saved?.selectedItem?.kind === "sound" ? saved.selectedItem.item : null);
+    const restoredTransport = refreshedTransportSelection(transportCandidate, data);
+    const restoredDuration = restoredTransport
+      ? Math.max(0, Number(saved?.transportDurationMs ?? restoredTransport.durationMs) || 0)
+      : 0;
+    const restoredPlayhead = restoredTransport
+      ? Math.max(0, Math.min(
+          restoredDuration || Number.POSITIVE_INFINITY,
+          Number(saved?.transportPlayheadMs) || 0,
+        ))
+      : 0;
+    const pausedTransport = restoredTransport
+      ? { ...restoredTransport, durationMs: restoredDuration }
+      : null;
+    playingSoundRef.current = pausedTransport;
+    durationTargetRef.current = pausedTransport?.id ?? null;
+    setPlayingSound(pausedTransport);
     setPlayingId(null);
     setIsPlaying(false);
-    setPlayheadMs(0);
-    setDurationMs(0);
-    setSeqVariationBySound({});
+    setPlayheadMs(restoredPlayhead);
+    setDurationMs(restoredDuration);
+    setSeqVariationBySound(saved?.seqVariationBySound || {});
     setSeqEditorSourceBySound({});
+    if (saved?.seqEditorSourceBySound) setSeqEditorSourceBySound(saved.seqEditorSourceBySound);
     seqVariationRevisionRef.current += 1;
     setSeqVariationRevision((revision) => revision + 1);
-    seqVariationsBySoundRef.current = {};
+    seqVariationsBySoundRef.current = saved?.seqVariationsBySound || {};
     seqVariationLoadsRef.current.clear();
-    setSeqVariationsBySound({});
-    seqPlaybackBySoundRef.current = {};
-    setSeqPlaybackBySound({});
-    setHistory([initial]);
-    setHistoryIndex(0);
-    setTweak("showWelcome", false);
-    setDirty(false);
-    strmPlaybackBySoundRef.current = {};
+    setSeqVariationsBySound(seqVariationsBySoundRef.current);
+    seqPlaybackBySoundRef.current = saved?.seqPlaybackBySound || {};
+    setSeqPlaybackBySound(seqPlaybackBySoundRef.current);
+    setHistory(saved?.history?.length ? saved.history : [initial]);
+    setHistoryIndex(saved?.history?.length
+      ? Math.max(0, Math.min(saved.history.length - 1, Number(saved.historyIndex) || 0))
+      : 0);
+    setTweak("showWelcome", !data.archive);
+    strmPlaybackBySoundRef.current = saved?.strmPlaybackBySound || {};
     strmPlaybackRevisionRef.current += 1;
     strmPlaybackLoadsRef.current.clear();
-    setStrmPlaybackBySound({});
+    setStrmPlaybackBySound(strmPlaybackBySoundRef.current);
     soundListAutoPlayEnabledRef.current = false;
     visibleSoundIdsRef.current = [];
     setSoundListAutoPlayEnabled(false);
     if (Array.isArray(recent)) setRecentArchives(recent);
-    else refreshRecentArchives();
+    else if (refreshRecent) refreshRecentArchives();
   }
 
   async function openArchive() {
@@ -2781,7 +3046,6 @@ function App() {
 
   async function openRecentArchive(path) {
     if (!window.pysar || !path) return;
-    setPendingRecentPath(null);
     setOpenError(null);
     setLoadingArchive(true);
     const result = await window.pysar.call("load_archive", path).catch((error) => ({ ok: false, error: String(error) }));
@@ -2794,6 +3058,32 @@ function App() {
     acceptArchiveData(result.data, result.recentArchives);
   }
 
+  async function activateArchiveDocument(documentId) {
+    if (!window.pysar || !documentId || documentId === activeDocumentIdRef.current || loadingArchive || archiveActivationRef.current || dumpStatus?.busy) return;
+    rememberActiveArchiveWorkspace();
+    const cachedData = archiveDataByDocumentRef.current[documentId] || null;
+    archiveActivationRef.current = true;
+    if (!cachedData) setLoadingArchive(true);
+    const result = await window.pysar.call("activate_archive", documentId, !cachedData)
+      .catch((error) => ({ ok: false, error: String(error) }));
+    archiveActivationRef.current = false;
+    if (!cachedData) setLoadingArchive(false);
+    if (!result?.ok) {
+      setOpenError(result?.error || "Could not switch archives");
+      return;
+    }
+    const nextData = result.data || archiveDataWithDocumentState(
+      cachedData,
+      result.activeDocumentId || documentId,
+      result.documents,
+    );
+    if (!nextData) {
+      setOpenError("Could not restore the selected archive");
+      return;
+    }
+    acceptArchiveData(nextData, null, { rememberCurrent: false, refreshRecent: false });
+  }
+
   async function forgetRecentArchive(path) {
     if (!window.pysar || !path) return;
     const result = await window.pysar.call("forget_recent_archive", path).catch(() => null);
@@ -2802,9 +3092,21 @@ function App() {
 
   function handleDirtyChange(isDirty) {
     setDirty(isDirty);
+    const documentId = activeDocumentIdRef.current;
+    if (documentId) {
+      setDocuments((current) => current.map((document) => (
+        document.id === documentId ? { ...document, dirty: !!isDirty } : document
+      )));
+    }
   }
   function handleDataRefresh(data) {
     window.PYSAR_DATA = data;
+    if (data?.activeDocumentId) archiveDataByDocumentRef.current[data.activeDocumentId] = data;
+    if (Array.isArray(data.documents)) setDocuments(data.documents);
+    if (data.activeDocumentId !== undefined) {
+      setActiveDocumentId(data.activeDocumentId);
+      activeDocumentIdRef.current = data.activeDocumentId;
+    }
     // Sequence payload/labels may have changed while the sound ID stayed the
     // same.  Invalidate the derived variation cache so the editor and
     // transport cannot keep using pre-mutation offsets.
@@ -2817,6 +3119,7 @@ function App() {
     setSeqPlaybackBySound({});
     setArchive(data.archive);
     if (data.archive) setSafeMode(data.archive.safeMode !== false);
+    if (data.archive) setDirty(!!data.archive.dirty);
     setDataRevision((revision) => revision + 1);
     setTabs((current) => current.map((tabItem) => {
       if (tabItem.kind === "view" || !tabItem.item) return tabItem;
@@ -2912,11 +3215,19 @@ function App() {
     if (affectedSounds.has(Number(active?.id))) invalidateSequencePlayback(active.id);
   }
 
-  async function saveArchive() {
+  async function saveArchive(documentId = activeDocumentIdRef.current) {
     if (!window.pysar) return false;
-    const result = await window.pysar.call("save_archive").catch((e) => ({ ok: false, error: String(e) }));
+    const isActive = !documentId || documentId === activeDocumentIdRef.current;
+    const result = await window.pysar.call(
+      isActive ? "save_archive" : "save_archive_document",
+      ...(isActive ? [] : [documentId]),
+    ).catch((e) => ({ ok: false, error: String(e) }));
     if (result?.ok) {
-      setDirty(false);
+      if (result.data?.documents) setDocuments(result.data.documents);
+      if (isActive) {
+        setDirty(false);
+        if (result.data) handleDataRefresh(result.data);
+      }
       return true;
     }
     setOpenError(result?.error || "Save failed");
@@ -3023,65 +3334,89 @@ function App() {
     }
   }
 
-  async function closeArchive() {
+  async function closeArchive(documentId = activeDocumentIdRef.current, discard = false) {
     if (!window.pysar) return;
-    stop();
-    const result = await window.pysar.call("close_archive").catch(() => null);
-    if (result?.ok) {
-      window.PYSAR_DATA = result.data;
-      setArchive(null);
-      setSafeMode(true);
-      setDirty(false);
-      setSelectedItem(null);
-      playingSoundRef.current = null;
-      setPlayingSound(null);
-      setTabs([{ id: "all", kind: "view", view: "all", title: "All sounds" }]);
-      setActiveTab("all");
-      setNavView("all");
-      setSoundFilter("ALL");
-      strmPlaybackBySoundRef.current = {};
-      setStrmPlaybackBySound({});
-      soundListAutoPlayEnabledRef.current = false;
-      visibleSoundIdsRef.current = [];
-      setSoundListAutoPlayEnabled(false);
+    const targetId = documentId || activeDocumentIdRef.current;
+    const wasActive = targetId === activeDocumentIdRef.current;
+    if (wasActive) {
+      rememberActiveArchiveWorkspace();
       setSeqEditorSourceBySound({});
+      stop();
+    }
+    const targetIndex = documents.findIndex((document) => document.id === targetId);
+    const remainingDocuments = documents.filter((document) => document.id !== targetId);
+    const expectedActiveId = wasActive
+      ? (remainingDocuments[Math.min(Math.max(0, targetIndex), remainingDocuments.length - 1)]?.id || null)
+      : activeDocumentIdRef.current;
+    const cachedNextData = expectedActiveId
+      ? archiveDataByDocumentRef.current[expectedActiveId] || null
+      : null;
+    const result = await window.pysar.call("close_archive", targetId, !!discard, !cachedNextData)
+      .catch((error) => ({ ok: false, error: String(error) }));
+    if (result?.requiresSave) {
+      setPendingCloseDocumentId(targetId);
+      setUnsavedBusy(false);
+      setUnsavedAction("close");
+      return;
+    }
+    if (!result?.ok) {
+      setOpenError(result?.error || "Could not close archive");
+      return;
+    }
+    if (result?.ok) {
+      delete archiveWorkspacesRef.current[targetId];
+      delete archiveDataByDocumentRef.current[targetId];
+      const nextData = result.data || archiveDataWithDocumentState(
+        cachedNextData,
+        result.activeDocumentId || expectedActiveId,
+        result.documents,
+      );
+      if (wasActive || nextData?.activeDocumentId !== activeDocumentIdRef.current) {
+        acceptArchiveData(nextData, null, { rememberCurrent: false, refreshRecent: false });
+      } else {
+        window.PYSAR_DATA = nextData;
+        if (nextData?.activeDocumentId) {
+          archiveDataByDocumentRef.current[nextData.activeDocumentId] = nextData;
+        }
+        setDocuments(Array.isArray(nextData?.documents) ? nextData.documents : []);
+      }
     }
   }
 
   function requestOpen() {
     if (dumpStatus?.busy || loadingArchive) return;
-    setPendingRecentPath(null);
-    if (dirty) { setUnsavedBusy(false); setUnsavedAction("open"); return; }
     openArchive();
   }
   function requestOpenRecent(path) {
     if (!path || dumpStatus?.busy || loadingArchive) return;
     setMenuOpen(null);
-    if (dirty) {
-      setPendingRecentPath(path);
-      setUnsavedBusy(false);
-      setUnsavedAction("recent");
-      return;
-    }
     openRecentArchive(path);
   }
-  function requestClose() {
+  function requestClose(documentId = activeDocumentIdRef.current) {
     if (dumpStatus?.busy) return;
-    if (dirty) { setUnsavedBusy(false); setUnsavedAction("close"); return; }
-    closeArchive();
+    const document = documents.find((candidate) => candidate.id === documentId);
+    const hasChanges = documentId === activeDocumentIdRef.current ? dirty : !!document?.dirty;
+    if (hasChanges) {
+      setPendingCloseDocumentId(documentId);
+      setUnsavedBusy(false);
+      setUnsavedAction("close");
+      return;
+    }
+    closeArchive(documentId, false);
   }
 
   async function handleUnsavedSave() {
     const action = unsavedAction;
-    const recentPath = pendingRecentPath;
     if (!action || unsavedBusy) return;
     setUnsavedBusy(true);
-    const saved = await saveArchive();
-    if (!saved) {
-      setUnsavedBusy(false);
-      return;
-    }
     if (action === "window") {
+      const saved = await window.pysar?.call("save_all_archives")
+        .catch((error) => ({ ok: false, error: String(error) }));
+      if (!saved?.ok) {
+        setOpenError(saved?.error || "Could not save all archives");
+        setUnsavedBusy(false);
+        return;
+      }
       const result = await window.pysar?.call("confirm_window_close").catch((error) => ({ ok: false, error: String(error) }));
       if (!result?.ok) {
         setOpenError(result?.error || "Could not close the application");
@@ -3089,16 +3424,19 @@ function App() {
       }
       return;
     }
+    const targetId = pendingCloseDocumentId || activeDocumentIdRef.current;
+    const saved = await saveArchive(targetId);
+    if (!saved) {
+      setUnsavedBusy(false);
+      return;
+    }
     setUnsavedAction(null);
     setUnsavedBusy(false);
-    setPendingRecentPath(null);
-    if (action === "open") openArchive();
-    else if (action === "recent" && recentPath) openRecentArchive(recentPath);
-    else if (action === "close") closeArchive();
+    setPendingCloseDocumentId(null);
+    if (action === "close") closeArchive(targetId, false);
   }
   async function handleUnsavedDiscard() {
     const action = unsavedAction;
-    const recentPath = pendingRecentPath;
     if (!action || unsavedBusy) return;
     if (action === "window") {
       setUnsavedBusy(true);
@@ -3109,19 +3447,19 @@ function App() {
       }
       return;
     }
+    const targetId = pendingCloseDocumentId || activeDocumentIdRef.current;
     setUnsavedAction(null);
     setUnsavedBusy(false);
-    setPendingRecentPath(null);
-    if (action === "open") openArchive();
-    else if (action === "recent" && recentPath) openRecentArchive(recentPath);
-    else if (action === "close") closeArchive();
+    setPendingCloseDocumentId(null);
+    if (action === "close") closeArchive(targetId, true);
   }
   function handleUnsavedCancel() {
     const action = unsavedAction;
     if (unsavedBusy) return;
     setUnsavedAction(null);
     setUnsavedBusy(false);
-    setPendingRecentPath(null);
+    setPendingCloseDocumentId(null);
+    setWindowCloseInfo(null);
     if (action === "window") {
       window.pysar?.call("cancel_window_close").catch(() => {});
     }
@@ -3133,7 +3471,34 @@ function App() {
     const result = await window.pysar.call("update_sound", soundId, patch).catch((e) => ({ ok: false, error: String(e) }));
     if (result?.ok) {
       if (result.dirty) setDirty(true);
-      if (result.data) handleDataRefresh(result.data);
+      const refreshedData = result.data || dataWithSoundPatch(window.PYSAR_DATA, result.soundPatch);
+      if (refreshedData) handleDataRefresh(refreshedData);
+      if (Object.prototype.hasOwnProperty.call(patch, "bank")) {
+        const active = playingSoundRef.current;
+        if (
+          active?.type === "SEQ"
+          && Number(active.id) === Number(soundId)
+          && isPlayingRef.current
+        ) {
+          const refreshed = (refreshedData?.sounds || []).find(
+            (sound) => Number(sound.id) === Number(soundId),
+          );
+          if (refreshed) {
+            const refreshedTransport = {
+              ...refreshed,
+              durationMs: active.durationMs,
+              seqVariation: active.seqVariation || null,
+            };
+            await play(
+              refreshedTransport,
+              playheadMsRef.current,
+              true,
+              null,
+              { deferAudioHandoff: true },
+            );
+          }
+        }
+      }
       return true;
     } else {
       setOpenError(result?.error || "Update failed");
@@ -4304,6 +4669,13 @@ function App() {
   }, [dirty, archive, dumpStatus?.busy, loadingArchive]);
 
   const tab = tabs.find((t) => t.id === activeTab);
+  const pendingCloseDocument = documents.find((document) => document.id === pendingCloseDocumentId);
+  const windowDirtyCount = Math.max(1, Number(windowCloseInfo?.dirtyCount || 1));
+  const unsavedMessage = unsavedAction === "window"
+    ? (windowDirtyCount === 1
+      ? "One open archive has unsaved changes. Save it before closing PYSAR?"
+      : `${windowDirtyCount} open archives have unsaved changes. Save all of them before closing PYSAR?`)
+    : `${pendingCloseDocument?.name || archive?.name || "This archive"} has unsaved changes. Save it before closing the tab?`;
 
   useEffectA(() => {
     const icon = pysarIconForTab(tab);
@@ -4535,6 +4907,64 @@ function App() {
             )}
           </div>
         )}
+        <div className={`menu-item${menuOpen === "help" ? " open" : ""}`}
+             onMouseEnter={() => openApplicationMenu("help")}
+             onMouseLeave={() => closeApplicationMenu("help")}
+             onClick={(e) => { e.stopPropagation(); setMenuOpen(menuOpen === "help" ? null : "help"); }}>
+          Help
+          {menuOpen === "help" && (
+            <div className="menu-dropdown" role="menu">
+              <button className="menu-entry" onClick={() => { setMenuOpen(null); setShowAbout(true); }}>
+                About PYSAR
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="archive-tabbar" role="tablist" aria-label="Open archives">
+        <div className="archive-tabs-scroll">
+          {documents.map((document) => (
+            <div
+              role="tab"
+              aria-selected={document.id === activeDocumentId}
+              aria-disabled={loadingArchive || !!dumpStatus?.busy}
+              tabIndex={document.id === activeDocumentId ? 0 : -1}
+              key={document.id}
+              className={`archive-tab${document.id === activeDocumentId ? " active" : ""}`}
+              title={document.path || document.name}
+              onClick={() => { if (!loadingArchive && !dumpStatus?.busy) activateArchiveDocument(document.id); }}
+              onKeyDown={(event) => {
+                if ((event.key === "Enter" || event.key === " ") && !loadingArchive && !dumpStatus?.busy) {
+                  event.preventDefault();
+                  activateArchiveDocument(document.id);
+                }
+              }}
+            >
+              <PysarIcon name="project.png" className="archive-tab-icon" />
+              <span className="archive-tab-name">{document.name}</span>
+              {document.dirty && <span className="archive-tab-dirty" title="Unsaved changes">{"\u2022"}</span>}
+              <button
+                type="button"
+                className="archive-tab-close"
+                aria-label={`Close ${document.name}`}
+                title={`Close ${document.name}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (!loadingArchive && !dumpStatus?.busy) requestClose(document.id);
+                }}
+              >{"\u00d7"}</button>
+            </div>
+          ))}
+        </div>
+        <button
+          type="button"
+          className="archive-tab-add"
+          onClick={requestOpen}
+          disabled={loadingArchive || !!dumpStatus?.busy}
+          title="Open another archive"
+          aria-label="Open another archive"
+        >+</button>
       </div>
 
       <div className="titlebar">
@@ -4665,13 +5095,14 @@ function App() {
               </div>
             ))}
           </div>
-          <div className="content">{content}</div>
+          <div className="content" key={activeDocumentId || "welcome"}>{content}</div>
         </main>
         {tw.showInspector && (
           <div className="pane-resizer inspector-resizer" onMouseDown={(e) => startPanelResize("inspector", e)} title="Resize inspector"></div>
         )}
         {tw.showInspector && (
           <Inspector
+            key={activeDocumentId || "welcome"}
             active={inspectorTab}
             onSwitch={setInspectorTab}
             item={selectedItem}
@@ -4773,10 +5204,13 @@ function App() {
           onDiscard={handleUnsavedDiscard}
           onCancel={handleUnsavedCancel}
           busy={unsavedBusy}
-          message={unsavedAction === "open" || unsavedAction === "recent"
-            ? "The file was modified. Do you want to save it before opening another file?"
-            : "The file was modified. Do you want to save the file before closing?"}
+          message={unsavedMessage}
+          saveLabel={unsavedAction === "window" && windowDirtyCount > 1 ? "Save all" : "Save"}
+          discardLabel={unsavedAction === "window" && windowDirtyCount > 1 ? "Don't save any" : "Don't save"}
         />
+      )}
+      {showAbout && (
+        <AboutDialog appMeta={appMeta} onClose={() => setShowAbout(false)} onError={setOpenError} />
       )}
       {dumpStatus && (
         <DumpArchiveStatusDialog

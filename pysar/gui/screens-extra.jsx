@@ -337,6 +337,7 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
   const [refreshRevision, setRefreshRevision] = React.useState(0);
   const [follow, setFollow] = React.useState(false);
   const [scoreView, setScoreView] = React.useState(false);
+  const [preparedScoreKey, setPreparedScoreKey] = React.useState(null);
   const [exportMenuOpen, setExportMenuOpen] = React.useState(false);
   const [lintState, setLintState] = React.useState({ status: "idle", error: "", line: null });
   const codeRef = React.useRef(null);
@@ -349,6 +350,29 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
   const safeModeBlocksEditing = safeMode && sound.isNew !== true;
   const ownsPlayhead = !!playingSound && playingSound.id === sound.id;
   const isThisPlaying = ownsPlayhead && isPlaying;
+  const scoreKey = `${sound.id}:${selectedVariation?.id || "default"}:${refreshRevision}`;
+  const scoreMounted = preparedScoreKey === scoreKey;
+
+  React.useEffect(() => {
+    if (editing || loading || !details || scoreMounted) return undefined;
+    if (scoreView) {
+      setPreparedScoreKey(scoreKey);
+      return undefined;
+    }
+    const prepare = () => setPreparedScoreKey(scoreKey);
+    if (typeof window.requestIdleCallback === "function") {
+      const idle = window.requestIdleCallback(prepare, { timeout: 1200 });
+      return () => window.cancelIdleCallback(idle);
+    }
+    const timeout = window.setTimeout(prepare, 500);
+    return () => window.clearTimeout(timeout);
+  }, [editing, loading, details, scoreView, scoreKey, scoreMounted]);
+
+  function showScoreView(enabled) {
+    const next = !!enabled;
+    if (next && !scoreMounted) setPreparedScoreKey(scoreKey);
+    setScoreView(next);
+  }
 
   React.useEffect(() => {
     if (!ownsPlayhead) return undefined;
@@ -742,7 +766,7 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
                 title={safeModeBlocksEditing ? "Disable Safe Mode to edit this original sequence" : "Edit the BRSEQ MML source"}
               >Edit MML</Button>
             )}
-            {!editing && <Toggle on={scoreView} onChange={setScoreView} label="Score" />}
+            {!editing && <Toggle on={scoreView} onChange={showScoreView} label="Score" />}
             {!editing && <Toggle on={follow} onChange={setFollow} label="Follow playhead" />}
           </div>
 
@@ -837,27 +861,33 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
             {lintState.status === "idle" && "MML validation ready"}
           </button>
         </div>
-      ) : scoreView ? (
-        <SequenceScoreView
-          soundId={sound.id}
-          revision={refreshRevision}
-          playheadMs={ownsPlayhead ? playheadMs : 0}
-          active={ownsPlayhead}
-          isPlaying={isThisPlaying}
-          follow={follow}
-          sequenceVariation={selectedVariation}
-        />
       ) : (
-        <>
-          <SequenceCodeView
-            displayTracks={displayTracks}
-            soundName={sound.name}
-            currentTrace={currentTrace}
-            follow={follow}
-            codeRef={codeRef}
-          />
-          <SeqKeyboard activeNotes={activeNotes} />
-        </>
+        <div className="seq-detail-views">
+          <div className={`seq-detail-layer seq-code-layer${scoreView ? " is-hidden" : ""}`} aria-hidden={scoreView ? "true" : "false"}>
+            <SequenceCodeView
+              displayTracks={displayTracks}
+              soundName={sound.name}
+              currentTrace={scoreView ? null : currentTrace}
+              follow={follow && !scoreView}
+              codeRef={codeRef}
+            />
+            <SeqKeyboard activeNotes={scoreView ? [] : activeNotes} />
+          </div>
+          {scoreMounted && (
+            <div className={`seq-detail-layer seq-score-layer${scoreView ? "" : " is-hidden"}`} aria-hidden={scoreView ? "false" : "true"}>
+              <SequenceScoreView
+                soundId={sound.id}
+                revision={refreshRevision}
+                playheadMs={ownsPlayhead ? playheadMs : 0}
+                active={scoreView && ownsPlayhead}
+                isPlaying={scoreView && isThisPlaying}
+                follow={follow}
+                sequenceVariation={selectedVariation}
+                visible={scoreView}
+              />
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

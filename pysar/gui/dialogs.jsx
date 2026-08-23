@@ -52,14 +52,14 @@ function pysarAlert(message, options = {}) {
   return pysarDialogController.request("alert", message, options);
 }
 
-function ModalOverlay({ children, onClose, title, width = 520 }) {
+function ModalOverlay({ children, onClose, title, width = 520, className = "" }) {
   const titleId = React.useId();
   const dialogRef = useRefD(null);
   useEffectD(() => {
     const previous = document.activeElement;
     const dialog = dialogRef.current;
     const focusable = () => Array.from(dialog?.querySelectorAll(
-      'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
     ) || []);
     const preferred = dialog?.querySelector("[autofocus]") || focusable()[0];
     preferred?.focus();
@@ -89,7 +89,7 @@ function ModalOverlay({ children, onClose, title, width = 520 }) {
   }, []);
   return (
     <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div ref={dialogRef} className="modal-dialog" style={{ width, maxWidth: "calc(100vw - 32px)" }} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
+      <div ref={dialogRef} className={`modal-dialog ${className}`.trim()} style={{ width, maxWidth: "calc(100vw - 32px)" }} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
         <div className="modal-header">
           <span className="modal-title" id={titleId}>{title}</span>
           <button className="modal-close" onClick={onClose} aria-label="Close dialog">✕</button>
@@ -1389,7 +1389,7 @@ function ChooseRwavEncodingDialog({ target, onClose, onReplace }) {
   );
 }
 
-function UnsavedDialog({ onSave, onDiscard, onCancel, busy = false, message = null }) {
+function UnsavedDialog({ onSave, onDiscard, onCancel, busy = false, message = null, saveLabel = "Save", discardLabel = "Don't save" }) {
   return (
     <ModalOverlay title="Unsaved Changes" onClose={busy ? () => {} : onCancel} width={410}>
       <div className="dialog-form">
@@ -1397,9 +1397,9 @@ function UnsavedDialog({ onSave, onDiscard, onCancel, busy = false, message = nu
           {message || "The file was modified. Do you want to save the file before closing?"}
         </div>
         <div className="dialog-actions" style={{ gap: 8 }}>
-          <button className="tb-btn" onClick={onDiscard} disabled={busy}>Don't save</button>
+          <button className="tb-btn" onClick={onDiscard} disabled={busy}>{discardLabel}</button>
           <button className="tb-btn" onClick={onCancel} disabled={busy}>Cancel</button>
-          <button className="tb-btn primary" onClick={onSave} disabled={busy}>{busy ? "Saving…" : "Save"}</button>
+          <button className="tb-btn primary" onClick={onSave} disabled={busy}>{busy ? "Saving…" : saveLabel}</button>
         </div>
       </div>
     </ModalOverlay>

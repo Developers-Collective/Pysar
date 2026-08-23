@@ -12,18 +12,44 @@
 <script>
   window.PYSAR_NATIVE_CHROME = true;
   window.PYSAR_APP = { name: "PYSAR - 1.0.0", version: "1.0.0", displayVersion: "1.0.0", phase: "Stable" };
-  window.PYSAR_DATA = { archive: null, sounds: [], banks: [], groups: [], players: [], waveArchives: [], files: [] };
+  window.PYSAR_DATA = { archive: null, activeDocumentId: null, documents: [], sounds: [], banks: [], groups: [], players: [], waveArchives: [], files: [] };
 
   window.pysar = {
     ready: new Promise((resolve) => {
       window.addEventListener("pywebviewready", () => resolve(window.pywebview.api));
     }),
+    documentMethods: new Set(["open_archive_dialog", "load_archive", "activate_archive", "close_archive"]),
+    activeCalls: 0,
+    idleWaiters: [],
+    documentChange: Promise.resolve(),
+    waitForIdle() {
+      if (window.pysar.activeCalls === 0) return Promise.resolve();
+      return new Promise((resolve) => window.pysar.idleWaiters.push(resolve));
+    },
     async call(method, ...args) {
       const api = await window.pysar.ready;
       if (typeof api[method] !== "function") {
         throw new Error("PYSAR API has no method: " + method);
       }
-      return api[method](...args);
+      if (window.pysar.documentMethods.has(method)) {
+        const previous = window.pysar.documentChange;
+        const operation = previous.catch(() => {}).then(async () => {
+          await window.pysar.waitForIdle();
+          return api[method](...args);
+        });
+        window.pysar.documentChange = operation.then(() => undefined, () => undefined);
+        return operation;
+      }
+      await window.pysar.documentChange;
+      window.pysar.activeCalls += 1;
+      try {
+        return await api[method](...args);
+      } finally {
+        window.pysar.activeCalls -= 1;
+        if (window.pysar.activeCalls === 0) {
+          window.pysar.idleWaiters.splice(0).forEach((resolve) => resolve());
+        }
+      }
     },
     on(eventType, handler) {
       window.addEventListener("pysar-event", (e) => {

@@ -23,7 +23,10 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDelet
           {s.type === "WAVE" && (
             <Field label="Wave archive"><RefSelect value={s.audioFileId} options={waveArchiveOptions} empty="No compatible archive" onChange={(v) => patch("waveArchive", v)} onNavigate={onNavigate} referenceKind="archive" /></Field>
           )}
-          <Field label="Group"><RefSelect value={s.group} options={D.groups || []} empty="No group" disabled onNavigate={onNavigate} referenceKind="group" /></Field>
+          <Field label="Group"><RefSelect value={s.group} options={D.groups || []} empty="No group" disabled={!!s.fileProtected || !!s.protected} onChange={(v) => patch("group", v)} onNavigate={onNavigate} referenceKind="group" /></Field>
+          {Number(s.fileReferenceCount || 0) > 1 && (
+            <div className="routing-shared-note">This backing file is shared by {s.fileReferenceCount} resources; changing its group moves them together.</div>
+          )}
         </CollapsibleSection>
         <CollapsibleSection title="Volume & Pan">
           <Field label="Volume"><NumberInput value={s.volume} min={0} max={127} onChange={(v) => patch("volume", v)} /></Field>

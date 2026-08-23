@@ -192,7 +192,7 @@ def main() -> int:
             return False
         if api.consume_window_close_authorization():
             return None
-        if not api.session.dirty:
+        if not api.has_dirty_documents():
             return None
         # pywebview cancels a close when a handler returns False. The prompt is
         # dispatched just after this native callback unwinds so evaluating JS

@@ -6,6 +6,7 @@ import struct
 import threading
 import time
 import uuid
+import webbrowser
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,6 +36,8 @@ from pysar.seq.types import PlaybackContext
 def _empty_ui_data() -> dict[str, Any]:
     return {
         "archive": None,
+        "activeDocumentId": None,
+        "documents": [],
         "sounds": [],
         "banks": [],
         "groups": [],
@@ -117,6 +120,9 @@ class PysarApi:
         self.recent_service = RecentArchiveService()
         self.settings_service = SettingsService()
         self.session = self.project_service.new_session()
+        self._archive_sessions: dict[str, Any] = {}
+        self._archive_document_order: list[str] = []
+        self._active_document_id: str | None = None
         self.discord_presence = DiscordPresence()
         self.discord_presence.start()
         atexit.register(self.discord_presence.close)
@@ -190,7 +196,14 @@ class PysarApi:
 
         def dispatch() -> None:
             try:
-                self.push_event("window_close_requested", None)
+                dirty_documents = [
+                    document for document in self._archive_documents()
+                    if document["dirty"]
+                ]
+                self.push_event("window_close_requested", {
+                    "dirtyCount": len(dirty_documents),
+                    "names": [document["name"] for document in dirty_documents],
+                })
             except Exception:
                 # Let a later close attempt retry if the frontend was still
                 # loading or was temporarily unavailable.
@@ -253,6 +266,100 @@ class PysarApi:
             "phase": __release_phase__,
         }
 
+    def open_external_url(self, url: str) -> dict:
+        """Open one of Pysar's published project/community links safely."""
+        allowed = {
+            "https://discord.gg/4s72Nnm",
+        }
+        target = str(url or "").strip()
+        if target not in allowed:
+            return {"ok": False, "error": "That external link is not allowed"}
+        try:
+            opened = bool(webbrowser.open(target, new=2))
+            return {"ok": opened, **({} if opened else {"error": "Could not open the link"})}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @staticmethod
+    def _archive_path_key(path: str | Path | None) -> str | None:
+        if path is None:
+            return None
+        return str(Path(path).expanduser().resolve(strict=False)).casefold()
+
+    def _ensure_archive_documents(self) -> None:
+        """Initialize document bookkeeping for normal and lightweight test APIs."""
+        if not hasattr(self, "_archive_sessions"):
+            self._archive_sessions = {}
+        if not hasattr(self, "_archive_document_order"):
+            self._archive_document_order = []
+        if not hasattr(self, "_active_document_id"):
+            self._active_document_id = None
+        if self._active_document_id is not None or getattr(self.session, "archive", None) is None:
+            return
+        document_id = uuid.uuid4().hex
+        self._archive_sessions[document_id] = self.session
+        self._archive_document_order.append(document_id)
+        self._active_document_id = document_id
+
+    def _archive_documents(self) -> list[dict[str, Any]]:
+        self._ensure_archive_documents()
+        documents = []
+        for document_id in self._archive_document_order:
+            session = self._archive_sessions.get(document_id)
+            if session is None or session.archive is None:
+                continue
+            path = session.archive_path
+            documents.append({
+                "id": document_id,
+                "name": path.name if path is not None else "Untitled archive",
+                "path": str(path) if path is not None else None,
+                "dirty": bool(session.dirty),
+                "active": document_id == self._active_document_id,
+                "safeMode": bool(session.safe_mode),
+            })
+        return documents
+
+    def _document_using_path(self, path: str | Path, *, excluding: str | None = None) -> str | None:
+        self._ensure_archive_documents()
+        path_key = self._archive_path_key(path)
+        return next((
+            document_id
+            for document_id in self._archive_document_order
+            if document_id != excluding
+            and self._archive_path_key(self._archive_sessions[document_id].archive_path) == path_key
+        ), None)
+
+    def has_dirty_documents(self) -> bool:
+        return any(document["dirty"] for document in self._archive_documents())
+
+    def _activate_archive_document(self, document_id: str, *, clear_audio: bool = True) -> None:
+        self._ensure_archive_documents()
+        session = self._archive_sessions.get(str(document_id))
+        if session is None or session.archive is None:
+            raise ValueError("That archive tab is no longer open")
+        changed = str(document_id) != self._active_document_id
+        if changed and clear_audio:
+            self._clear_audio_streams()
+        self._active_document_id = str(document_id)
+        self.session = session
+        session.archive.set_safe_mode(session.safe_mode)
+
+    def activate_archive(self, document_id: str, include_ui_data: bool = True) -> dict:
+        try:
+            if self.dump_in_progress:
+                return {"ok": False, "error": "Wait for the archive dump to finish"}
+            self._activate_archive_document(str(document_id))
+            result = {
+                "ok": True,
+                "activeDocumentId": self._active_document_id,
+                "documents": self._archive_documents(),
+            }
+            if bool(include_ui_data):
+                result["data"] = self._ui_data()
+            return result
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def _require_safe_mutation(
             self,
             action: str,
@@ -298,9 +405,18 @@ class PysarApi:
 
     def load_archive(self, path: str) -> dict:
         try:
-            self._clear_audio_streams()
-            clear_wave_payload_cache()
-            self.session = self.project_service.open_archive(path)
+            self._ensure_archive_documents()
+            existing_id = self._document_using_path(path)
+            if existing_id is None:
+                opened = self.project_service.open_archive(path)
+                document_id = uuid.uuid4().hex
+                self._archive_sessions[document_id] = opened
+                self._archive_document_order.append(document_id)
+                self._clear_audio_streams()
+                self._active_document_id = document_id
+                self.session = opened
+            else:
+                self._activate_archive_document(existing_id)
             try:
                 recent = self.recent_service.remember(path)
             except Exception:
@@ -317,10 +433,41 @@ class PysarApi:
 
     def save_archive(self, path: Optional[str] = None) -> dict:
         try:
+            if path is not None and self._document_using_path(
+                path,
+                excluding=self._active_document_id,
+            ) is not None:
+                return {"ok": False, "error": "That path is already open in another archive tab"}
             saved = self.project_service.save_archive(self.session, path)
-            return {"ok": True, "path": str(saved)}
+            return {"ok": True, "path": str(saved), "dirty": False, "data": self._ui_data()}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    def save_archive_document(self, document_id: str) -> dict:
+        """Save one open document without changing the active tab."""
+        try:
+            self._ensure_archive_documents()
+            session = self._archive_sessions.get(str(document_id))
+            if session is None or session.archive is None:
+                return {"ok": False, "error": "That archive tab is no longer open"}
+            saved = self.project_service.save_archive(session)
+            return {"ok": True, "path": str(saved), "dirty": False, "data": self._ui_data()}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def save_all_archives(self) -> dict:
+        """Save every modified archive before a multi-document window closes."""
+        try:
+            self._ensure_archive_documents()
+            saved_paths = []
+            for document_id in self._archive_document_order:
+                session = self._archive_sessions[document_id]
+                if not session.dirty:
+                    continue
+                saved_paths.append(str(self.project_service.save_archive(session)))
+            return {"ok": True, "paths": saved_paths, "dirty": False, "data": self._ui_data()}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "data": self._ui_data()}
 
     @staticmethod
     def _next_dump_destination(parent: Path, stem: str) -> Path:
@@ -823,10 +970,53 @@ class PysarApi:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def close_archive(self) -> dict:
-        self._clear_audio_streams()
-        self.project_service.close_session(self.session)
-        return {"ok": True, "data": _empty_ui_data()}
+    def close_archive(
+            self,
+            document_id: str | None = None,
+            discard: bool = False,
+            include_ui_data: bool = True,
+    ) -> dict:
+        try:
+            self._ensure_archive_documents()
+            target_id = str(document_id or self._active_document_id or "")
+            session = self._archive_sessions.get(target_id)
+            if session is None:
+                return {"ok": False, "error": "That archive tab is no longer open"}
+            if session.dirty and not bool(discard):
+                return {"ok": False, "requiresSave": True, "error": "The archive has unsaved changes"}
+
+            was_active = target_id == self._active_document_id
+            target_index = self._archive_document_order.index(target_id)
+            del self._archive_sessions[target_id]
+            self._archive_document_order.remove(target_id)
+            self.project_service.close_session(session)
+
+            if was_active:
+                self._clear_audio_streams()
+                if self._archive_document_order:
+                    next_index = min(target_index, len(self._archive_document_order) - 1)
+                    next_id = self._archive_document_order[next_index]
+                    self._active_document_id = next_id
+                    self.session = self._archive_sessions[next_id]
+                else:
+                    self._active_document_id = None
+                    self.session = self.project_service.new_session()
+
+            documents = self._archive_documents()
+            result = {
+                "ok": True,
+                "closedDocumentId": target_id,
+                "activeDocumentId": self._active_document_id,
+                "documents": documents,
+            }
+            if bool(include_ui_data) or self._active_document_id is None:
+                data = self._ui_data() if self._active_document_id is not None else _empty_ui_data()
+                if self._active_document_id is None:
+                    data["documents"] = documents
+                result["data"] = data
+            return result
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     def get_state(self) -> dict:
         return {"ok": True, "data": self._ui_data()}
@@ -3188,6 +3378,10 @@ class PysarApi:
                     raise ValueError("A WAVE sound must reference a wave archive")
                 archive.set_wave_sound_archive(int(sound_id), int(patch["waveArchive"]))
                 playback_changed = True
+            if "group" in patch:
+                if patch["group"] is None:
+                    raise ValueError("A sound's backing file must belong to a group")
+                archive.move_file_to_group(int(entry.file_index), int(patch["group"]))
             if "priority" in patch:
                 entry.player_priority = max(0, min(127, int(patch["priority"])))
                 playback_changed = True
@@ -3201,6 +3395,19 @@ class PysarApi:
             self.project_service.mark_dirty(self.session)
             if playback_changed:
                 self._clear_audio_streams()
+            if set(patch) == {"bank"}:
+                # Rebuilding the complete archive model is especially costly for
+                # large archives (every bank, sound and file is enumerated).  A
+                # bank route changes only this sound, so let the UI apply the
+                # authoritative value without delaying the live preview restart.
+                return {
+                    "ok": True,
+                    "soundPatch": {
+                        "id": int(sound_id),
+                        "bank": int(entry.sound_info.bank_index),
+                    },
+                    "dirty": True,
+                }
             return {"ok": True, "data": self._ui_data(), "dirty": True}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -5032,7 +5239,11 @@ class PysarApi:
             return {"ok": False, "error": str(exc)}
 
     def get_dirty_state(self) -> dict:
-        return {"ok": True, "dirty": self.session.dirty}
+        return {
+            "ok": True,
+            "dirty": self.session.dirty,
+            "dirtyDocuments": sum(1 for document in self._archive_documents() if document["dirty"]),
+        }
 
     def save_archive_as(self) -> dict:
         if self._window is None:
@@ -5046,6 +5257,11 @@ class PysarApi:
             if not result:
                 return {"ok": False, "error": "Cancelled"}
             path = result if isinstance(result, str) else result[0]
+            if self._document_using_path(
+                path,
+                excluding=self._active_document_id,
+            ) is not None:
+                return {"ok": False, "error": "That path is already open in another archive tab"}
             saved = self.project_service.save_archive(self.session, path)
             try:
                 self.recent_service.remember(str(saved))
@@ -7178,8 +7394,12 @@ class PysarApi:
         self._window.evaluate_js(js)
 
     def _ui_data(self) -> dict[str, Any]:
+        self._ensure_archive_documents()
         if self.session.archive is None:
-            return _empty_ui_data()
+            data = _empty_ui_data()
+            data["documents"] = self._archive_documents()
+            data["activeDocumentId"] = self._active_document_id
+            return data
 
         archive_path = self.session.archive_path
         archive = self.session.archive
@@ -7219,7 +7439,6 @@ class PysarApi:
                 "audioFileId": item.audio_file_id,
                 "entries": entries,
             })
-        group_ids = {group["name"]: group["id"] for group in groups}
         banks = [
             {
                 "id": item.bank_index,
@@ -7269,12 +7488,19 @@ class PysarApi:
         sounds = []
         for item in self.archive_service.list_sounds(self.session):
             entry = archive.data.sound_entries[item.sound_id] if item.sound_id < len(archive.data.sound_entries) else None
+            group_id = None
+            if 0 <= int(item.file_index) < len(archive.data.file_entries):
+                positions = archive.data.file_entries[int(item.file_index)].file_positions
+                if positions:
+                    candidate_group = int(positions[0].group_index)
+                    if 0 <= candidate_group < len(archive.data.group_entries):
+                        group_id = candidate_group
             sound_data = {
                 "id": item.sound_id,
                 "name": item.name,
                 "type": item.sound_type,
                 "bank": item.bank_index,
-                "group": group_ids.get(item.group_name),
+                "group": group_id,
                 "player": item.player_index,
                 "file": item.file_index,
                 "volume": item.volume,
@@ -7285,6 +7511,8 @@ class PysarApi:
                 "audioFileId": item.audio_file_id,
                 "isNew": archive.is_new("sound", item.sound_id),
                 "protected": archive.is_protected("sound", item.sound_id),
+                "fileProtected": archive.is_protected("file", item.file_index),
+                "fileReferenceCount": len(archive._users_of_file(item.file_index)),
             }
             if entry is not None and entry.sound_type == SoundType.WAVE:
                 required_slot = int(getattr(entry.sound_info, "wave_index", -1))
@@ -7352,11 +7580,14 @@ class PysarApi:
                 "players": summary.player_count,
                 "version": summary.version,
                 "safeMode": bool(self.session.safe_mode),
+                "dirty": bool(self.session.dirty),
                 "provenanceStatus": archive.data.provenance.status,
                 "newEntityCount": sum(
                     len(entries) for entries in archive.data.provenance.entities.values()
                 ),
             },
+            "activeDocumentId": self._active_document_id,
+            "documents": self._archive_documents(),
             "sounds": sounds,
             "banks": banks,
             "groups": groups,

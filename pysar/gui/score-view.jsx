@@ -1,3 +1,5 @@
+const SCORE_INITIAL_ZOOM = 0.3;
+
 function scoreQuarterToMidiQuarter(quarter, anchors) {
   if (!anchors?.length) return quarter;
   if (quarter <= Number(anchors[0].scoreQuarter)) {
@@ -167,7 +169,7 @@ function refreshScoreViewportMetrics(state) {
 
 function applyScoreZoom(state, zoom) {
   if (!state?.paper || !state.stage) return;
-  const normalizedZoom = Math.max(0.3, Math.min(1.25, Number(zoom) || 0.75));
+  const normalizedZoom = Math.max(0.3, Math.min(1.25, Number(zoom) || SCORE_INITIAL_ZOOM));
   const scale = normalizedZoom / state.renderZoom;
   state.zoom = normalizedZoom;
   state.scale = scale;
@@ -271,6 +273,7 @@ function SequenceScoreView({
   isPlaying = false,
   follow = false,
   sequenceVariation = null,
+  visible = true,
 }) {
   const viewportRef = React.useRef(null);
   const stageRef = React.useRef(null);
@@ -278,8 +281,8 @@ function SequenceScoreView({
   const scoreStateRef = React.useRef(null);
   const playbackRef = React.useRef({ playheadMs, active, isPlaying, measuredAt: performance.now() });
   const followRef = React.useRef(follow);
-  const zoomRef = React.useRef(0.75);
-  const [zoom, setZoom] = React.useState(0.75);
+  const zoomRef = React.useRef(SCORE_INITIAL_ZOOM);
+  const [zoom, setZoom] = React.useState(SCORE_INITIAL_ZOOM);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState(null);
   const [warning, setWarning] = React.useState(null);
@@ -301,6 +304,7 @@ function SequenceScoreView({
   }, [playheadMs, active, isPlaying, follow]);
 
   React.useEffect(() => {
+    if (!visible) return undefined;
     let frame = 0;
     function update(now) {
       const playback = playbackRef.current;
@@ -315,7 +319,7 @@ function SequenceScoreView({
     }
     frame = window.requestAnimationFrame(update);
     return () => window.cancelAnimationFrame(frame);
-  }, [soundId, revision, follow]);
+  }, [soundId, revision, follow, visible]);
 
   React.useEffect(() => {
     const viewport = viewportRef.current;
