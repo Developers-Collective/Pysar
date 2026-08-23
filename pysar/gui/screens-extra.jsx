@@ -325,7 +325,7 @@ function SequenceCodeView({ displayTracks, soundName, currentTrace, follow, code
   );
 }
 
-function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, durationMs = 0, isPlaying = false, playingSound = null, selectedVariation = null, onVariation, variations = [], onLoadVariations, onSoundChange, safeMode = true, onDirty, onDataRefresh, onPlaybackInvalidate, onError, onDelete }) {
+function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, durationMs = 0, isPlaying = false, playingSound = null, selectedVariation = null, onVariation, variations = [], onLoadVariations, onSoundChange, safeMode = true, onDirty, onDataRefresh, onPlaybackInvalidate, onError, onRename, onDelete }) {
   const [playheadMs, setLivePlayheadMs] = React.useState(() => window.PysarPlayheadStore.getSnapshot());
   const [details, setDetails] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
@@ -749,7 +749,7 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
               onClick={replaceSequence}
               disabled={operationBusy || editing || safeModeBlocksEditing}
               title={safeModeBlocksEditing ? "Disable Safe Mode to replace this original sequence" : "Replace this sound from a BRSEQ or MIDI file"}
-            >Replace sequence…</Button>
+            >Replace</Button>
             <div className="seq-export-menu" ref={exportMenuRef}>
               <Button
                 onClick={() => setExportMenuOpen((open) => !open)}
@@ -760,16 +760,23 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
               {exportMenuOpen && (
                 <div className="menu-dropdown seq-export-dropdown" role="menu">
                   <button className="menu-entry" role="menuitem" onClick={() => { setExportMenuOpen(false); exportSequence("brseq"); }}>
-                    <span>Export BRSEQ…</span>
-                    <span className="seq-export-hint">Nintendo</span>
+                    <span>BRSEQ</span>
+                    <span className="seq-export-hint">Native sequence</span>
                   </button>
                   <button className="menu-entry" role="menuitem" onClick={() => { setExportMenuOpen(false); exportSequence("midi"); }}>
-                    <span>Export MIDI…</span>
+                    <span>MIDI</span>
                     <span className="seq-export-hint">Standard MIDI</span>
                   </button>
                 </div>
               )}
             </div>
+            {onRename && (
+              <Button
+                onClick={() => onRename(sound)}
+                disabled={operationBusy || editing || !!sound.protected}
+                title={sound.protected ? "Safe Mode protects this original sound" : "Rename sound"}
+              >Rename</Button>
+            )}
             {onDelete && (
               <Button
                 className="seq-delete-action"

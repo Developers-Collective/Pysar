@@ -65,21 +65,21 @@ function BanksTab({ onSelect, onActivate, onRename, onDelete, openId, query, onD
   return (
     <>
       <div className="toolbar">
-        <Button onClick={createBank} disabled={busy}>New bank</Button>
-        <Button ghost onClick={() => importBank("brbnk")} disabled={busy}>Import BRBNK…</Button>
-        <Button ghost onClick={() => importBank("sf2")} disabled={busy}>Import SF2…</Button>
+        <Button onClick={createBank} disabled={busy}>New</Button>
+        <Button ghost onClick={() => importBank("brbnk")} disabled={busy}>Import BRBNK</Button>
+        <Button ghost onClick={() => importBank("sf2")} disabled={busy}>Import SF2</Button>
         <span className="sep"></span>
         <Button
           disabled={!active || busy || !!active?.protected}
           onClick={() => runSelected(onRename)}
           title={active?.protected ? "Safe Mode protects this original bank" : undefined}
-        >Rename…</Button>
+        >Rename</Button>
         <Button
           className="danger"
           disabled={!active || busy || !!active?.protected}
           onClick={() => runSelected(onDelete)}
           title={active?.protected ? "Safe Mode protects this original bank" : undefined}
-        >Delete…</Button>
+        >Delete</Button>
         <span className="grow"></span>
         <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontFamily: "var(--font-mono)" }}>
           {D.banks.reduce((s, b) => s + b.instruments, 0)} instruments · {D.banks.reduce((s, b) => s + b.waves, 0)} waves

@@ -1,4 +1,4 @@
-function Inspector({ active, onSwitch, item, onNavigateReferrer, onUpdateSound, onRenameBank, onDeleteBank, onUpdateGroup, onUpdatePlayer, onDeleteGroup, onReplaceSound, onExportSound, onReplaceWave, onExportWave }) {
+function Inspector({ active, onSwitch, item, onNavigateReferrer, onUpdateSound, onRenameSound, onRenameBank, onDeleteBank, onUpdateGroup, onUpdatePlayer, onRenamePlayer, onDeleteGroup, onReplaceSound, onExportSound, onReplaceWave, onExportWave }) {
   const archivePart = item?.kind === "wave" ? `:${item.item?.archiveId ?? "archive"}` : "";
   const playerPart = item?.kind === "player"
     ? `:${item.item?.name ?? ""}:${item.item?.playableSounds ?? 0}:${item.item?.heap ?? 0}`
@@ -29,7 +29,7 @@ function Inspector({ active, onSwitch, item, onNavigateReferrer, onUpdateSound, 
         </button>
       </div>
       <div className="insp-body">
-        {active === "props" && <PropertiesTab key={`props:${itemKey}`} item={item} onNavigate={onNavigateReferrer} onUpdateSound={onUpdateSound} onRenameBank={onRenameBank} onDeleteBank={onDeleteBank} onUpdateGroup={onUpdateGroup} onUpdatePlayer={onUpdatePlayer} onDeleteGroup={onDeleteGroup} onReplaceSound={onReplaceSound} onExportSound={onExportSound} onReplaceWave={onReplaceWave} onExportWave={onExportWave} />}
+        {active === "props" && <PropertiesTab key={`props:${itemKey}`} item={item} onNavigate={onNavigateReferrer} onUpdateSound={onUpdateSound} onRenameSound={onRenameSound} onRenameBank={onRenameBank} onDeleteBank={onDeleteBank} onUpdateGroup={onUpdateGroup} onUpdatePlayer={onUpdatePlayer} onRenamePlayer={onRenamePlayer} onDeleteGroup={onDeleteGroup} onReplaceSound={onReplaceSound} onExportSound={onExportSound} onReplaceWave={onReplaceWave} onExportWave={onExportWave} />}
         {active === "refs" && <ReferencesTab key={`refs:${itemKey}`} item={item} onNavigateReferrer={onNavigateReferrer} />}
       </div>
     </aside>

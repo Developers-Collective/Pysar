@@ -105,15 +105,15 @@ function ArchivesTab({ onOpen, onActivate, onNavigate, onClear, openId, query, o
           primary
           onClick={importArchive}
           title="Add a validated BRWAR as an unreferenced audio-only archive; links are not created automatically"
-        >Import BRWAR…</Button>
-        <Button disabled={!active} onClick={() => call("export_wave_archive_dialog", [active.id])}>Export…</Button>
-        <Button disabled={!active} onClick={replaceArchive}>Replace…</Button>
+        >Import BRWAR</Button>
+        <Button disabled={!active} onClick={() => call("export_wave_archive_dialog", [active.id])}>Export</Button>
+        <Button disabled={!active} onClick={replaceArchive}>Replace</Button>
         <Button
           disabled={!active || !!active?.protected}
           className="danger"
           onClick={deleteArchive}
           title={active?.protected ? "Safe Mode protects this original wave archive" : undefined}
-        >Delete…</Button>
+        >Delete</Button>
         <span className="grow"></span>
         <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontFamily: "var(--font-mono)" }}>
           {archives.length} archives · {totalWaves} waves · {formatBytes(totalSize)}

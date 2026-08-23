@@ -98,17 +98,17 @@ function ArchiveDetail({
           )}
         </div>
       </div>
-      <div className="toolbar war-wave-actions">
+      <div className="toolbar resource-toolbar war-wave-actions">
         <Button
           disabled={!selectedWave || !onExportWave}
           onClick={() => selectedWave && onExportWave?.(archive.id, selectedWave.index)}
           title="Export the selected BRWAV as raw BRWAV or decoded WAV"
-        >Export…</Button>
+        >Export</Button>
         <Button
           disabled={!selectedWave || !onReplaceWave}
           onClick={() => selectedWave && onReplaceWave?.(archive.id, selectedWave.index)}
           title="Replace the selected BRWAV from a BRWAV or WAV file"
-        >Replace…</Button>
+        >Replace</Button>
         <span className="grow"></span>
         <span className="war-wave-actions-status mono">
           {selectedWave ? `Selected BRWAV #${selectedWave.index}` : "Select a BRWAV to export or replace"}

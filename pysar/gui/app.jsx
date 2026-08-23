@@ -3003,14 +3003,29 @@ function App() {
 
   // property update
   async function updateSoundProperty(soundId, patch) {
-    if (!window.pysar) return;
+    if (!window.pysar) return false;
     const result = await window.pysar.call("update_sound", soundId, patch).catch((e) => ({ ok: false, error: String(e) }));
     if (result?.ok) {
       if (result.dirty) setDirty(true);
       if (result.data) handleDataRefresh(result.data);
+      return true;
     } else {
       setOpenError(result?.error || "Update failed");
+      return false;
     }
+  }
+
+  async function renameSound(sound) {
+    if (!window.pysar || sound?.id == null || sound.protected) return false;
+    const requested = await window.pysarPrompt("Rename sound", sound.name || "", {
+      label: "Sound name",
+      confirmLabel: "Rename",
+      maxLength: 255,
+    });
+    if (requested == null) return false;
+    const name = requested.trim();
+    if (!name || name === sound.name) return false;
+    return updateSoundProperty(sound.id, { name });
   }
 
   async function exportSound(soundId) {
@@ -3174,15 +3189,30 @@ function App() {
   }
 
   async function updatePlayerProperty(playerId, patch) {
-    if (!window.pysar) return;
+    if (!window.pysar) return false;
     const result = await window.pysar.call("update_player", playerId, patch)
       .catch((error) => ({ ok: false, error: String(error) }));
     if (result?.ok) {
       if (result.dirty) setDirty(true);
       if (result.data) handleDataRefresh(result.data);
+      return true;
     } else {
       setOpenError(result?.error || "Player update failed");
+      return false;
     }
+  }
+
+  async function renamePlayer(player) {
+    if (!window.pysar || player?.id == null || player.protected) return false;
+    const requested = await window.pysarPrompt("Rename player", player.name || "", {
+      label: "Player name",
+      confirmLabel: "Rename",
+      maxLength: 255,
+    });
+    if (requested == null) return false;
+    const name = requested.trim();
+    if (!name || name === player.name) return false;
+    return updatePlayerProperty(player.id, { name });
   }
 
   async function runBankMutation(operation) {
@@ -3470,12 +3500,13 @@ function App() {
       },
       onReplaceSound: requestSoundReplacement,
       onExportSound: exportSound,
+      onRenameSound: renameSound,
       selectedSoundId: selectedItem?.kind === "sound" ? selectedItem.id : null,
     };
     if (tab.view === "all") content = <SoundsScreen filter={soundFilter} onFilterChange={changeSoundFilter} query={searchQuery} onClearSearch={() => setSearchQuery("")} onOpen={selectOnly} onActivate={openSound} onWarm={warmSoundPreview} onVisibleSoundsChange={rememberVisibleSounds} openId={selectedItem?.kind === "sound" ? selectedItem.id : null} density={tw.density} onPlay={play} playingId={playingId && isPlaying ? playingId : null} {...soundTableActions} />;
     else if (tab.view === "banks") content = <BanksTab query={searchQuery} onSelect={selectOrgItem} onActivate={openItem} onRename={renameBank} onDelete={deleteBank} openId={selectedItem?.kind === "bank" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
     else if (tab.view === "groups") content = <GroupsTab query={searchQuery} onOpen={selectOrgItem} onNavigate={navigateToReferrer} openId={selectedItem?.kind === "group" ? selectedItem.id : null} safeMode={safeMode} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
-    else if (tab.view === "players") content = <PlayersTab query={searchQuery} onOpen={selectOrgItem} onClear={() => setSelectedItem(null)} openId={selectedItem?.kind === "player" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
+    else if (tab.view === "players") content = <PlayersTab query={searchQuery} onOpen={selectOrgItem} onRename={renamePlayer} onClear={() => setSelectedItem(null)} openId={selectedItem?.kind === "player" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
     else if (tab.view === "archives") content = <ArchivesTab query={searchQuery} onOpen={selectOrgItem} onActivate={openItem} onNavigate={navigateToReferrer} onClear={() => setSelectedItem(null)} openId={selectedItem?.kind === "archive" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
     else if (tab.view === "files") content = <FilesTab query={searchQuery} onOpen={selectFile} onNavigate={navigateToReferrer} openId={selectedItem?.kind === "file" ? selectedItem.id : null} openFileIndex={selectedItem?.kind === "file" ? (selectedItem.item?.fileIndex ?? null) : null} />;
   } else if (tab.kind === "sound") {
@@ -3498,6 +3529,7 @@ function App() {
           onDataRefresh={handleDataRefresh}
           onPlaybackInvalidate={invalidateSequencePlayback}
           onError={setOpenError}
+          onRename={renameSound}
           onDelete={deleteSeqSound}
         />
       );
@@ -3510,6 +3542,9 @@ function App() {
           playingId={playingId && isPlaying ? playingId : null}
           refreshRevision={dataRevision}
           onPlaybackInvalidate={invalidateStrmSources}
+          onReplace={requestSoundReplacement}
+          onExport={exportSound}
+          onRename={renameSound}
         />
       );
     } else {
@@ -3520,6 +3555,9 @@ function App() {
         playingId={playingId && isPlaying ? playingId : null}
         playingSoundId={playingSound?.id ?? null}
         durationMs={durationMs}
+        onReplace={requestSoundReplacement}
+        onExport={exportSound}
+        onRename={renameSound}
       />;
     }
   } else if (tab.kind === "bank") {
@@ -3795,10 +3833,12 @@ function App() {
             item={selectedItem}
             onNavigateReferrer={navigateToReferrer}
             onUpdateSound={updateSoundProperty}
+            onRenameSound={renameSound}
             onRenameBank={renameBank}
             onDeleteBank={deleteBank}
             onUpdateGroup={updateGroupProperty}
             onUpdatePlayer={updatePlayerProperty}
+            onRenamePlayer={renamePlayer}
             onDeleteGroup={deleteGroup}
             onReplaceSound={requestSoundReplacement}
             onExportSound={exportSound}

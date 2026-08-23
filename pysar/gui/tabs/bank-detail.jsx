@@ -252,14 +252,14 @@ function BankDetail({ bank, onNavigate, onDirty, onDataRefresh, onPlaybackInvali
         data-pysar-reference={pysarReferenceKey({ kind: "bank", id: bank.id })}
         tabIndex={-1}
       >
-        <div className="toolbar">
+        <div className="toolbar resource-toolbar">
           <Button primary onClick={addInstrument} disabled={!details || instrumentBusy}>
             {instrumentBusy ? "Adding…" : "New instrument"}
           </Button>
           <span className="sep"></span>
           <Button ghost onClick={exportBank} disabled={fileBusy}>Export</Button>
-          <Button onClick={() => replaceBank("brbnk")} disabled={fileBusy}>Replace BRBNK…</Button>
-          <Button onClick={() => replaceBank("sf2")} disabled={fileBusy}>Import SF2…</Button>
+          <Button onClick={() => replaceBank("brbnk")} disabled={fileBusy}>Replace BRBNK</Button>
+          <Button onClick={() => replaceBank("sf2")} disabled={fileBusy}>Import SF2</Button>
         </div>
         <div className="empty-state">
           <div className="empty-card" style={{ borderStyle: "solid" }}>
@@ -283,14 +283,14 @@ function BankDetail({ bank, onNavigate, onDirty, onDataRefresh, onPlaybackInvali
   return (
     <div className="bank-split" data-pysar-reference={pysarReferenceKey({ kind: "bank", id: bank.id })} tabIndex={-1}>
       <div className="inst-list">
-        <div className="toolbar">
+        <div className="toolbar resource-toolbar">
           <Button primary onClick={addInstrument} disabled={instrumentBusy}>
             {instrumentBusy ? "Adding…" : "New instrument"}
           </Button>
           <span className="sep"></span>
           <Button ghost onClick={exportBank} disabled={fileBusy}>Export</Button>
-          <Button onClick={() => replaceBank("brbnk")} disabled={fileBusy}>Replace BRBNK…</Button>
-          <Button onClick={() => replaceBank("sf2")} disabled={fileBusy}>Import SF2…</Button>
+          <Button onClick={() => replaceBank("brbnk")} disabled={fileBusy}>Replace BRBNK</Button>
+          <Button onClick={() => replaceBank("sf2")} disabled={fileBusy}>Import SF2</Button>
           <span className="grow"></span>
           <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontFamily: "var(--font-mono)" }}>
             {details.activeInstrumentCount}/{details.instrumentCount} active · {details.waveCount} waves

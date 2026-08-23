@@ -26,7 +26,7 @@ const SOUND_TABLE_COLUMNS = [
   ...SOUND_COLUMNS,
 ];
 
-function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, onOpen, onActivate, onWarm, onVisibleSoundsChange, openId, density, onPlay, playingId, onAddSound, onReplaceSound, onExportSound, selectedSoundId }) {
+function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, onOpen, onActivate, onWarm, onVisibleSoundsChange, openId, density, onPlay, playingId, onAddSound, onReplaceSound, onExportSound, onRenameSound, selectedSoundId }) {
   const D = window.PYSAR_DATA;
   const [sortBy, setSortBy] = useStateS("id");
   const [sortDir, setSortDir] = useStateS("asc");
@@ -112,7 +112,10 @@ function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, on
   }, [rows, onVisibleSoundsChange]);
 
   const visibleColumnDefs = SOUND_COLUMNS;
-  const replaceSoundId = rows.some((s) => s.id === selectedSoundId) ? selectedSoundId : null;
+  const selectedSound = selectedSoundId == null
+    ? null
+    : rows.find((sound) => Number(sound.id) === Number(selectedSoundId)) || null;
+  const replaceSoundId = selectedSound?.id ?? null;
   const exportSoundId = replaceSoundId;
   const searchHasNoResults = trimmedQuery.length > 0 && rows.length === 0;
 
@@ -167,13 +170,18 @@ function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, on
           />
         </div>
         <div className="sounds-toolbar-actions">
-          <Button primary onClick={onAddSound}>Add new sound</Button>
+          <Button primary onClick={onAddSound} title="Add a sound">Add</Button>
           <Button onClick={() => onReplaceSound && onReplaceSound(replaceSoundId)} disabled={replaceSoundId == null}>
-            Replace sound
+            Replace
           </Button>
           <Button onClick={() => onExportSound && onExportSound(exportSoundId)} disabled={exportSoundId == null} title="Export selected sound">
             Export
           </Button>
+          <Button
+            onClick={() => selectedSound && onRenameSound?.(selectedSound)}
+            disabled={!selectedSound || !!selectedSound.protected}
+            title={selectedSound?.protected ? "Safe Mode protects this original sound" : "Rename selected sound"}
+          >Rename</Button>
         </div>
       </div>
 
@@ -245,7 +253,7 @@ function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, on
   );
 }
 
-function StreamSoundDetail({ sound, onPlay, onNavigate, onPlaybackInvalidate, playingId, refreshRevision = 0 }) {
+function StreamSoundDetail({ sound, onPlay, onNavigate, onPlaybackInvalidate, onReplace, onExport, onRename, playingId, refreshRevision = 0 }) {
   const [playheadMs, setLivePlayheadMs] = useStateS(() => window.PysarPlayheadStore.getSnapshot());
   const D = window.PYSAR_DATA;
   const [details, setDetails] = useStateS(null);
@@ -360,6 +368,13 @@ function StreamSoundDetail({ sound, onPlay, onNavigate, onPlaybackInvalidate, pl
         </div>
         <div className="detail-actions">
           <Button onClick={() => onPlay(sound)}>{isPlaying ? "Pause" : "Preview"}</Button>
+          <Button onClick={() => onReplace?.(sound.id)}>Replace</Button>
+          <Button onClick={() => onExport?.(sound.id)}>Export</Button>
+          <Button
+            onClick={() => onRename?.(sound)}
+            disabled={!!sound.protected}
+            title={sound.protected ? "Safe Mode protects this original sound" : "Rename sound"}
+          >Rename</Button>
         </div>
       </div>
 
@@ -480,7 +495,7 @@ function StreamSoundDetail({ sound, onPlay, onNavigate, onPlaybackInvalidate, pl
   );
 }
 
-function SoundDetail({ sound, onPlay, onNavigate, playingId, playingSoundId = null, durationMs = 0 }) {
+function SoundDetail({ sound, onPlay, onNavigate, onReplace, onExport, onRename, playingId, playingSoundId = null, durationMs = 0 }) {
   const [playheadMs, setLivePlayheadMs] = useStateS(() => window.PysarPlayheadStore.getSnapshot());
   const D = window.PYSAR_DATA;
   const bank = D.banks.find(b => b.id === sound.bank);
@@ -546,6 +561,13 @@ function SoundDetail({ sound, onPlay, onNavigate, playingId, playingSoundId = nu
           <Button onClick={() => onPlay(sound)}>
             {isPlaying ? "Pause" : "Preview"}
           </Button>
+          <Button onClick={() => onReplace?.(sound.id)}>Replace</Button>
+          <Button onClick={() => onExport?.(sound.id)}>Export</Button>
+          <Button
+            onClick={() => onRename?.(sound)}
+            disabled={!!sound.protected}
+            title={sound.protected ? "Safe Mode protects this original sound" : "Rename sound"}
+          >Rename</Button>
         </div>
       </div>
 

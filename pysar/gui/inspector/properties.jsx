@@ -1,4 +1,4 @@
-function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameBank, onDeleteBank, onUpdateGroup, onUpdatePlayer, onDeleteGroup, onReplaceSound, onExportSound, onReplaceWave, onExportWave }) {
+function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onRenameBank, onDeleteBank, onUpdateGroup, onUpdatePlayer, onRenamePlayer, onDeleteGroup, onReplaceSound, onExportSound, onReplaceWave, onExportWave }) {
   const D = window.PYSAR_DATA;
   // SOUND properties
   if (item.kind === "sound") {
@@ -38,13 +38,21 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameBank, onDelete
           )}
         </CollapsibleSection>
         <CollapsibleSection title="Actions" defaultOpen={true}>
-          <div style={{ display: "flex", gap: 6, padding: "4px 0" }}>
-            <button className="tb-btn" style={{ flex: 1 }} onClick={() => { if (onReplaceSound) onReplaceSound(s.id); }}>
-              Replace Sound…
+          <div className="inspector-actions">
+            <button
+              className="tb-btn"
+              disabled={!!s.protected}
+              title={s.protected ? "Safe Mode protects this original sound" : "Rename sound"}
+              onClick={() => onRenameSound?.(s)}
+            >
+              Rename
+            </button>
+            <button className="tb-btn" onClick={() => { if (onReplaceSound) onReplaceSound(s.id); }}>
+              Replace
             </button>
             {(["STRM", "WAVE", "SEQ"].includes(s.type)) && (
-              <button className="tb-btn" style={{ flex: 1 }} onClick={() => { if (onExportSound) onExportSound(s.id); }}>
-                Export…
+              <button className="tb-btn" onClick={() => { if (onExportSound) onExportSound(s.id); }}>
+                Export
               </button>
             )}
           </div>
@@ -70,12 +78,12 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameBank, onDelete
           <Field label="Audio file"><RefSelect value={b.audioFileId} options={D.waveArchives || []} disabled empty="No audio file" onNavigate={onNavigate} referenceKind="archive" /></Field>
         </CollapsibleSection>
         <CollapsibleSection title="Actions">
-          <div style={{ display: "flex", gap: 6, padding: "4px 0" }}>
-            <button className="tb-btn" style={{ flex: 1 }} disabled={!!b.protected} onClick={() => onRenameBank?.(b)}>
-              Rename…
+          <div className="inspector-actions">
+            <button className="tb-btn" disabled={!!b.protected} onClick={() => onRenameBank?.(b)}>
+              Rename
             </button>
-            <button className="tb-btn danger" style={{ flex: 1 }} disabled={!!b.protected} onClick={() => onDeleteBank?.(b)}>
-              Delete…
+            <button className="tb-btn danger" disabled={!!b.protected} onClick={() => onDeleteBank?.(b)}>
+              Delete
             </button>
           </div>
         </CollapsibleSection>
@@ -94,6 +102,16 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameBank, onDelete
         <CollapsibleSection title="Capacity">
           <Field label="Playable sounds"><NumberInput value={p.playableSounds} min={0} max={255} onChange={(value) => patch("playableSounds", value)} /></Field>
           <Field label="Heap size"><NumberInput value={p.heap || 0} min={0} max={4294967295} onChange={(value) => patch("heapSize", value)} /></Field>
+        </CollapsibleSection>
+        <CollapsibleSection title="Actions">
+          <div className="inspector-actions">
+            <button
+              className="tb-btn"
+              disabled={!!p.protected}
+              title={p.protected ? "Safe Mode protects this original player" : "Rename player"}
+              onClick={() => onRenamePlayer?.(p)}
+            >Rename</button>
+          </div>
         </CollapsibleSection>
       </>
     );
@@ -118,7 +136,7 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameBank, onDelete
         </CollapsibleSection>
         <CollapsibleSection title="Actions">
           <button className="tb-btn danger" style={{ width: "100%" }} disabled={!!g.protected} onClick={() => onDeleteGroup?.(g.id, g.name)}>
-            Delete Group…
+            Delete
           </button>
         </CollapsibleSection>
       </>
@@ -203,19 +221,19 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameBank, onDelete
           <Field label="Size"><ReadOnly value={sizeStr} /></Field>
         </CollapsibleSection>
         <CollapsibleSection title="Actions" defaultOpen={true}>
-          <div style={{ display: "flex", gap: 6, padding: "4px 0" }}>
+          <div className="inspector-actions">
             <button
               className="tb-btn"
               style={{ flex: 1 }}
               disabled={w.archiveId == null || (w.index ?? w.waveIndex) == null}
               onClick={() => onReplaceWave?.(w.archiveId, w.index ?? w.waveIndex)}
-            >Replace…</button>
+            >Replace</button>
             <button
               className="tb-btn"
               style={{ flex: 1 }}
               disabled={w.archiveId == null || (w.index ?? w.waveIndex) == null}
               onClick={() => onExportWave?.(w.archiveId, w.index ?? w.waveIndex)}
-            >Export…</button>
+            >Export</button>
           </div>
         </CollapsibleSection>
       </>

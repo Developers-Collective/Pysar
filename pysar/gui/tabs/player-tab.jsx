@@ -1,4 +1,4 @@
-function PlayersTab({ onOpen, onClear, openId, query, onDataRefresh, onDirty, onError }) {
+function PlayersTab({ onOpen, onRename, onClear, openId, query, onDataRefresh, onDirty, onError }) {
   const D = window.PYSAR_DATA;
   const rows = filterByQuery(D.players, query);
   const active = D.players.find((player) => player.id === openId) || null;
@@ -92,16 +92,21 @@ function PlayersTab({ onOpen, onClear, openId, query, onDataRefresh, onDirty, on
   return (
     <>
       <div className="toolbar">
-        <Button primary onClick={createPlayer}>New player</Button>
-        <Button onClick={importPlayer}>Import…</Button>
-        <Button disabled={!active} onClick={() => call("export_player_dialog", [active.id])}>Export…</Button>
-        <Button disabled={!active} onClick={replacePlayer}>Replace…</Button>
+        <Button primary onClick={createPlayer}>New</Button>
+        <Button onClick={importPlayer}>Import</Button>
+        <Button disabled={!active} onClick={() => call("export_player_dialog", [active.id])}>Export</Button>
+        <Button disabled={!active} onClick={replacePlayer}>Replace</Button>
+        <Button
+          disabled={!active || !!active?.protected}
+          onClick={() => active && onRename?.(active)}
+          title={active?.protected ? "Safe Mode protects this original player" : "Rename selected player"}
+        >Rename</Button>
         <Button
           disabled={!active || !!active?.protected}
           className="danger"
           onClick={deletePlayer}
           title={active?.protected ? "Safe Mode protects this original player" : undefined}
-        >Delete…</Button>
+        >Delete</Button>
         <span className="grow"></span>
         <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontFamily: "var(--font-mono)" }}>
           {D.players.length} players · {D.players.reduce((s, p) => s + (p.playableSounds || 0), 0)} playable sounds

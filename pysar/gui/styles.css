@@ -489,9 +489,10 @@ body.resizing-pane .pane-resizer::after {
   padding: 6px 12px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-panel-2);
-  height: 40px;
+  height: auto;
   min-height: 40px;
-  overflow: hidden;
+  flex-wrap: wrap;
+  overflow: visible;
   position: relative;
   z-index: 6;
 }
@@ -527,8 +528,8 @@ body.resizing-pane .pane-resizer::after {
   background: var(--bg-elevated);
   border-radius: var(--r-sm);
   font-size: 12px; color: var(--text-primary);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  min-width: 0; flex-shrink: 1;
+  white-space: nowrap; overflow: visible; text-overflow: clip;
+  min-width: max-content; flex-shrink: 0;
 }
 .tb-btn:hover { background: var(--bg-hover); border-color: var(--border-strong); }
 .tb-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -1427,7 +1428,7 @@ body.resizing-column * {
   padding: 18px 24px 24px;
 }
 .detail-h {
-  display: flex; align-items: flex-start; justify-content: space-between;
+  display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap;
   gap: 16px; margin-bottom: 20px;
 }
 .detail-h h1 {
@@ -1440,7 +1441,19 @@ body.resizing-column * {
   margin-bottom: 4px; font-family: var(--font-mono);
 }
 .detail-h .crumbs span { color: var(--text-secondary); }
-.detail-actions { display: flex; gap: 6px; }
+.detail-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+
+.inspector-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 4px 0;
+}
+.inspector-actions .tb-btn {
+  justify-content: center;
+  min-width: 0;
+  width: 100%;
+}
 
 .cards {
   display: grid;
