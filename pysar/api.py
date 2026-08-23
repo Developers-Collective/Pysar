@@ -129,6 +129,8 @@ class PysarApi:
         self._sequence_playback_cache: dict[tuple, dict[str, Any]] = {}
         self._duration_pending: set[tuple] = set()
         self._duration_lock = threading.Lock()
+        self._score_cache: dict[tuple, dict[str, Any]] = {}
+        self._score_cache_lock = threading.Lock()
         self._warm_lock = threading.Lock()
         self._warm_keys: set[tuple] = set()
         self._audio_cache_lock = threading.Lock()
@@ -948,6 +950,85 @@ class PysarApi:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    def get_sequence_musicxml(
+        self,
+        sound_id: int,
+        seq_note_override: int | None = None,
+        seq_program_override: int | None = None,
+        seq_random_overrides: Any = None,
+    ) -> dict:
+        """Engrave the exact runtime path used by sequence preview playback."""
+        try:
+            archive = self.project_service.require_archive(self.session)
+            sound_id = int(sound_id)
+            entry = self.archive_service._sound_entry(archive, sound_id)
+            if entry.sound_type != SoundType.SEQ:
+                raise ValueError("Selected sound is not a SEQ sound")
+
+            note_override = self._valid_midi_note(seq_note_override)
+            program_override = self._valid_program(seq_program_override)
+            random_overrides = self._valid_random_overrides(seq_random_overrides)
+            sound_name = self.archive_service._sound_name(archive, sound_id, entry)
+            cache_key = (
+                sound_id,
+                sound_name,
+                note_override,
+                program_override,
+                random_overrides,
+            )
+            with self._score_cache_lock:
+                cached = self._score_cache.get(cache_key)
+            if cached is not None:
+                return {"ok": True, **cached}
+
+            context = self._get_or_create_context(archive, sound_name)
+            settings = PreviewOptions(
+                seq_note_override=note_override,
+                seq_program_override=program_override,
+                seq_random_overrides=random_overrides,
+            ).to_render_options()
+            player = SequenceRenderer().make_sequence_player(context, settings)
+            events = player.render_events(
+                max_ticks=settings.max_ticks,
+                loop_count=settings.loop_count,
+                one_shot=settings.one_shot,
+            )
+
+            from pysar.seq.score import (
+                midi_bytes_to_musicxml_with_timing,
+                midi_bytes_to_tempo_map,
+                sequence_events_to_midi_bytes,
+            )
+
+            midi_data = sequence_events_to_midi_bytes(events, timebase=player.timebase)
+            timed_events = self._seq_event_times_ms(events, player.timebase)
+            duration_ms = (
+                timed_events[-1][0] + int(round(settings.tail_seconds * 1000))
+                if timed_events else 0
+            )
+            (
+                musicxml,
+                score_time_map,
+                measure_starts,
+                measure_durations,
+            ) = midi_bytes_to_musicxml_with_timing(midi_data, title=sound_name)
+            payload = {
+                "musicxml": musicxml,
+                "tempoMap": midi_bytes_to_tempo_map(midi_data),
+                "scoreTimeMap": score_time_map,
+                "measureStartQuarters": measure_starts,
+                "measureDurationQuarters": measure_durations,
+                "durationMs": duration_ms,
+                "truncated": bool(player.truncated),
+            }
+            with self._score_cache_lock:
+                self._score_cache[cache_key] = payload
+                while len(self._score_cache) > 4:
+                    self._score_cache.pop(next(iter(self._score_cache)))
+            return {"ok": True, **payload}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def lint_sequence_text(self, source_text: str) -> dict:
         """Validate MML through the same parse/write/read path used by Compile."""
         import re
@@ -1312,6 +1393,10 @@ class PysarApi:
             self._duration_cache.clear()
             self._sequence_playback_cache.clear()
             self._duration_pending.clear()
+        score_lock = getattr(self, "_score_cache_lock", None)
+        if score_lock is not None:
+            with score_lock:
+                self._score_cache.clear()
         with self._warm_lock:
             self._warm_keys.clear()
         with self._audio_cache_lock:
@@ -4496,23 +4581,72 @@ class PysarApi:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def delete_wave_archive(self, file_id: int, confirmed: bool = False) -> dict:
+    def get_wave_archive_delete_impact(self, file_id: int) -> dict:
         try:
             archive = self.project_service.require_archive(self.session)
-            references = archive.get_wave_archive_references(int(file_id))
-            live = [ref for ref in references if ref["kind"] in {"bank", "sound", "file"}]
-            if live and not bool(confirmed):
-                return {
-                    "ok": False,
-                    "requiresConfirmation": True,
-                    "error": "Wave archive is still referenced",
-                    "references": live,
-                }
-            archive.delete_wave_archive(int(file_id), detach_references=bool(confirmed))
+            file_id = int(file_id)
+            source_copy_ids = archive._wave_archive_copy_ids(file_id)
+            references = archive.get_wave_archive_references(file_id)
+            required_wave_count, users = archive._required_wave_archive_entries(file_id)
+
+            replacements = []
+            seen_copy_sets: set[tuple[int, ...]] = set()
+            for item in self.archive_service.list_wave_archives(self.session):
+                candidate_id = int(item.file_id)
+                if candidate_id in source_copy_ids:
+                    continue
+                try:
+                    copy_ids = tuple(sorted(archive._wave_archive_copy_ids(candidate_id)))
+                except Exception:
+                    continue
+                if copy_ids in seen_copy_sets:
+                    continue
+                seen_copy_sets.add(copy_ids)
+                if int(item.wave_count) < required_wave_count:
+                    continue
+                replacements.append({
+                    "id": candidate_id,
+                    "name": item.name,
+                    "waves": int(item.wave_count),
+                })
+            return {
+                "ok": True,
+                "sourceFileIds": sorted(source_copy_ids),
+                "files": [ref for ref in references if ref["kind"] == "file"],
+                "banks": [ref for ref in references if ref["kind"] == "bank"],
+                "sounds": [ref for ref in references if ref["kind"] == "sound"],
+                "groups": [ref for ref in references if ref["kind"] == "group"],
+                "requiredWaveCount": required_wave_count,
+                "requiredBy": users,
+                "replacements": replacements,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def delete_wave_archive(
+            self,
+            file_id: int,
+            replacement_file_id: int | None = None,
+    ) -> dict:
+        try:
+            file_id = int(file_id)
+            replacement = (
+                None if replacement_file_id is None else int(replacement_file_id)
+            )
+            with self.project_service.archive_transaction(
+                self.session,
+                f"Delete wave archive {file_id}",
+                destructive=True,
+            ) as candidate:
+                replacement_new = candidate.delete_wave_archive(file_id, replacement)
             self._clear_audio_streams()
             clear_wave_payload_cache()
-            self.project_service.mark_dirty(self.session)
-            return {"ok": True, "dirty": True, "data": self._ui_data()}
+            return {
+                "ok": True,
+                "dirty": True,
+                "replacementFileId": replacement_new,
+                "data": self._ui_data(),
+            }
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 

@@ -116,5 +116,6 @@ Pysar is licensed under the [Mozilla Public License 2.0](LICENSE).
 ## Third-party software
 
 Pysar includes React and ReactDOM 18.3.1 and Babel Standalone 7.29.0,
-which are distributed under the MIT License. See
-[third-party licenses](third_party_licenses/) for their complete notices.
+which are distributed under the MIT License. The sheet-music view bundles
+OpenSheetMusicDisplay 1.9.9 under its BSD 3-Clause license. See
+[third-party licenses](third_party_licenses/) for their complete terms.

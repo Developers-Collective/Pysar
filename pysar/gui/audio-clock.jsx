@@ -53,6 +53,23 @@
     return Number(activeSound.id) === Number(requestedSound.id);
   }
 
+  function followAutoplayInSoundTab(tabs, activeTabId, currentSoundId, nextSound) {
+    if (!nextSound) return tabs;
+    let changed = false;
+    const nextTabs = (Array.isArray(tabs) ? tabs : []).map((tab) => {
+      if (
+        tab?.id !== activeTabId
+        || tab.kind !== "sound"
+        || Number(tab.item?.id) !== Number(currentSoundId)
+      ) {
+        return tab;
+      }
+      changed = true;
+      return { ...tab, item: nextSound, title: nextSound.name };
+    });
+    return changed ? nextTabs : tabs;
+  }
+
   function createPlayheadStore(initialValue = 0) {
     let value = Math.max(0, Number(initialValue) || 0);
     const listeners = new Set();
@@ -138,6 +155,7 @@
   global.PysarNextVisibleSoundId = nextVisibleSoundId;
   global.PysarIsSoundListTransport = isSoundListTransport;
   global.PysarShouldPreserveSoundTransport = shouldPreserveSoundTransport;
+  global.PysarFollowAutoplayInSoundTab = followAutoplayInSoundTab;
   global.PysarCreatePlayheadStore = createPlayheadStore;
   global.PysarPlayheadStore = global.PysarPlayheadStore || createPlayheadStore();
   global.PysarTraceIndexAtOrBefore = traceIndexAtOrBefore;

@@ -1,4 +1,4 @@
-function Inspector({ active, onSwitch, item, onNavigateReferrer, onUpdateSound, onRenameSound, onDeleteSound, onRenameBank, onReplaceBank, onExportBank, onDeleteBank, onUpdateGroup, onUpdatePlayer, onRenamePlayer, onDeletePlayer, onDeleteGroup, onReplaceSound, onExportSound, onReplaceWave, onExportWave, onDeleteWave, onUpdateWave }) {
+function Inspector({ active, onSwitch, item, onNavigateReferrer, onUpdateSound, onRenameSound, onDeleteSound, onRenameBank, onReplaceBank, onExportBank, onDeleteBank, onUpdateGroup, onUpdatePlayer, onRenamePlayer, onDeletePlayer, onDeleteGroup, onDeleteArchive, onReplaceSound, onExportSound, onReplaceWave, onExportWave, onDeleteWave, onUpdateWave }) {
   const archivePart = item?.kind === "wave" ? `:${item.item?.archiveId ?? "archive"}` : "";
   const playerPart = item?.kind === "player"
     ? `:${item.item?.name ?? ""}:${item.item?.playableSounds ?? 0}:${item.item?.heap ?? 0}`
@@ -29,7 +29,7 @@ function Inspector({ active, onSwitch, item, onNavigateReferrer, onUpdateSound, 
         </button>
       </div>
       <div className="insp-body">
-        {active === "props" && <PropertiesTab key={`props:${itemKey}`} item={item} onNavigate={onNavigateReferrer} onUpdateSound={onUpdateSound} onRenameSound={onRenameSound} onDeleteSound={onDeleteSound} onRenameBank={onRenameBank} onReplaceBank={onReplaceBank} onExportBank={onExportBank} onDeleteBank={onDeleteBank} onUpdateGroup={onUpdateGroup} onUpdatePlayer={onUpdatePlayer} onRenamePlayer={onRenamePlayer} onDeletePlayer={onDeletePlayer} onDeleteGroup={onDeleteGroup} onReplaceSound={onReplaceSound} onExportSound={onExportSound} onReplaceWave={onReplaceWave} onExportWave={onExportWave} onDeleteWave={onDeleteWave} onUpdateWave={onUpdateWave} />}
+        {active === "props" && <PropertiesTab key={`props:${itemKey}`} item={item} onNavigate={onNavigateReferrer} onUpdateSound={onUpdateSound} onRenameSound={onRenameSound} onDeleteSound={onDeleteSound} onRenameBank={onRenameBank} onReplaceBank={onReplaceBank} onExportBank={onExportBank} onDeleteBank={onDeleteBank} onUpdateGroup={onUpdateGroup} onUpdatePlayer={onUpdatePlayer} onRenamePlayer={onRenamePlayer} onDeletePlayer={onDeletePlayer} onDeleteGroup={onDeleteGroup} onDeleteArchive={onDeleteArchive} onReplaceSound={onReplaceSound} onExportSound={onExportSound} onReplaceWave={onReplaceWave} onExportWave={onExportWave} onDeleteWave={onDeleteWave} onUpdateWave={onUpdateWave} />}
         {active === "refs" && <ReferencesTab key={`refs:${itemKey}`} item={item} onNavigateReferrer={onNavigateReferrer} />}
       </div>
     </aside>

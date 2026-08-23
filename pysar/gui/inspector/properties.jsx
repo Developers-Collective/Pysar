@@ -1,4 +1,4 @@
-function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDeleteSound, onRenameBank, onReplaceBank, onExportBank, onDeleteBank, onUpdateGroup, onUpdatePlayer, onRenamePlayer, onDeletePlayer, onDeleteGroup, onReplaceSound, onExportSound, onReplaceWave, onExportWave, onDeleteWave, onUpdateWave }) {
+function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDeleteSound, onRenameBank, onReplaceBank, onExportBank, onDeleteBank, onUpdateGroup, onUpdatePlayer, onRenamePlayer, onDeletePlayer, onDeleteGroup, onDeleteArchive, onReplaceSound, onExportSound, onReplaceWave, onExportWave, onDeleteWave, onUpdateWave }) {
   const D = window.PYSAR_DATA;
   // SOUND properties
   if (item.kind === "sound") {
@@ -188,6 +188,15 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDelet
                 })}
               </span>}
           </Field>
+        </CollapsibleSection>
+        <CollapsibleSection title="Actions">
+          <button
+            className="tb-btn danger"
+            style={{ width: "100%" }}
+            disabled={!!a.protected}
+            title={a.protected ? "Safe Mode protects this original wave archive" : "Delete wave archive"}
+            onClick={() => onDeleteArchive?.(a)}
+          >Delete</button>
         </CollapsibleSection>
       </>
     );

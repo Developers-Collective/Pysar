@@ -170,6 +170,8 @@ function App() {
   const [soundFilter, setSoundFilter] = useStateA("ALL");
   const [tabs, setTabs] = useStateA([{ id: "all", kind: "view", view: "all", title: "All sounds" }]);
   const [activeTab, setActiveTab] = useStateA("all");
+  const activeTabRef = React.useRef(activeTab);
+  activeTabRef.current = activeTab;
   const [inspectorTab, setInspectorTab] = useStateA("props");
   const [selectedItem, setSelectedItem] = useStateA(null);
   const [history, setHistory] = useStateA([{ tabId: "all", navView: "all", soundFilter: "ALL", selectedItem: null }]);
@@ -2119,6 +2121,12 @@ function App() {
     const nextSound = (window.PYSAR_DATA?.sounds || []).find((sound) => Number(sound.id) === nextSoundId);
     if (!nextSound) return false;
 
+    setTabs((currentTabs) => window.PysarFollowAutoplayInSoundTab(
+      currentTabs,
+      activeTabRef.current,
+      currentSound.id,
+      nextSound,
+    ));
     setSelectedItem({ kind: "sound", id: nextSound.id, name: nextSound.name, item: nextSound });
     if (options.resume) play(nextSound, 0, true);
     else queueSoundForPreview(nextSound);
@@ -3318,6 +3326,123 @@ function App() {
     return true;
   }
 
+  async function deleteWaveArchive(archiveItem) {
+    if (!window.pysar || archiveItem?.id == null || archiveItem.protected) return false;
+    const archiveId = Number(archiveItem.id);
+    const impact = await window.pysar.call("get_wave_archive_delete_impact", archiveId)
+      .catch((error) => ({ ok: false, error: String(error) }));
+    if (!impact?.ok) {
+      setOpenError(impact?.error || "Could not inspect wave archive dependencies");
+      return false;
+    }
+    const files = impact.files || [];
+    const banks = impact.banks || [];
+    const sounds = impact.sounds || [];
+    const groups = impact.groups || [];
+    const replacements = impact.replacements || [];
+    const hasDependents = files.length > 0;
+    if (hasDependents && !replacements.length) {
+      const required = Number(impact.requiredWaveCount) || 0;
+      await window.pysarAlert(
+        `No other wave archive has the ${required} wave${required === 1 ? "" : "s"} required by the linked files. ` +
+        "Import or expand a compatible archive before deleting this one.",
+        { title: "Wave archive cannot be deleted" },
+      );
+      return false;
+    }
+    const action = hasDependents ? {
+      id: "relink",
+      label: "Relink and delete",
+      description: "Relink every paired bank/RWSD file to a compatible wave archive, then delete this archive.",
+      confirmLabel: "Relink and delete",
+      tone: "danger",
+      selection: {
+        label: "Replacement wave archive",
+        options: replacements.map((item) => ({
+          value: item.id,
+          label: `${item.name} [${item.id}] · ${item.waves} waves`,
+        })),
+      },
+    } : {
+      id: "delete",
+      label: "Delete wave archive",
+      description: "No bank or RWSD data file depends on this archive.",
+      confirmLabel: "Delete wave archive",
+      tone: "danger",
+    };
+    const actionId = action.id;
+    const choice = await window.pysarConsequence(`Delete ${archiveItem.name || `WAR_${archiveId}`}?`, {
+      title: "Delete wave archive",
+      caption: "Exact consequences",
+      actions: [action],
+      resources: [
+        {
+          id: "archive",
+          resource: { badge: "RWAR", name: `${archiveItem.name} [${archiveId}]` },
+          outcomes: { [actionId]: { text: "Wave archive will be deleted", status: "deleted" } },
+        },
+        ...files.map((file) => ({
+          id: `file-${file.id}`,
+          resource: { badge: "FILE", name: file.name },
+          outcomes: { [actionId]: { text: "Audio archive link will be replaced", status: "modified" } },
+        })),
+        ...banks.map((bank) => ({
+          id: `bank-${bank.id}`,
+          resource: { badge: "BANK", name: `${bank.name} [${bank.id}]` },
+          outcomes: { [actionId]: { text: "Retained; wave indices remain valid", status: "retained" } },
+        })),
+        ...sounds.map((sound) => ({
+          id: `sound-${sound.id}`,
+          resource: { badge: "WAVE", name: `${sound.name} [${sound.id}]` },
+          outcomes: { [actionId]: { text: "Retained; backing file remains playable", status: "retained" } },
+        })),
+        ...groups.map((group) => ({
+          id: `group-${group.id}`,
+          resource: { badge: "GROUP", name: `${group.name} [${group.id}]` },
+          outcomes: { [actionId]: { text: "Retained; file linkage will be repaired", status: "retained" } },
+        })),
+      ],
+    });
+    if (choice?.action !== actionId) return false;
+    const replacementFileId = hasDependents ? Number(choice.selection) : null;
+    const result = await window.pysar.call("delete_wave_archive", archiveId, replacementFileId)
+      .catch((error) => ({ ok: false, error: String(error) }));
+    if (!result?.ok) {
+      setOpenError(result?.error || "Could not delete wave archive");
+      return false;
+    }
+    stop();
+    if (result.dirty) setDirty(true);
+    const oldArchives = window.PYSAR_DATA.waveArchives || [];
+    const oldIndex = oldArchives.findIndex((item) => Number(item.id) === archiveId);
+    if (result.data) handleDataRefresh(result.data);
+    const nextArchives = result.data?.waveArchives || [];
+    const replacement = result.replacementFileId == null
+      ? null
+      : nextArchives.find((item) => Number(item.id) === Number(result.replacementFileId));
+    const next = replacement
+      || nextArchives[Math.min(Math.max(0, oldIndex), nextArchives.length - 1)]
+      || null;
+    const nextSelection = next
+      ? { kind: "archive", id: next.id, name: next.name, item: next }
+      : null;
+    const sourceFileIds = new Set((impact.sourceFileIds || [archiveId]).map(Number));
+    setTabs((current) => {
+      const remaining = current.filter((item) => (
+        item.kind !== "archive" || !sourceFileIds.has(Number(item.item?.id))
+      ));
+      return remaining.some((item) => item.id === "archives")
+        ? remaining
+        : [...remaining, { id: "archives", kind: "view", view: "archives", title: "Wave archives" }];
+    });
+    setActiveTab("archives");
+    setNavView("archives");
+    setSelectedItem(nextSelection);
+    setHistory([{ tabId: "archives", navView: "archives", soundFilter, selectedItem: nextSelection }]);
+    setHistoryIndex(0);
+    return true;
+  }
+
   async function replaceWaveSound(soundId, path, encoding = null) {
     if (!window.pysar || soundId == null || !path) return;
     const result = await window.pysar.call("replace_wave_sound_from_path", soundId, path, encoding)
@@ -4035,7 +4160,7 @@ function App() {
     else if (tab.view === "banks") content = <BanksTab query={searchQuery} onSelect={selectOrgItem} onActivate={openItem} onReplace={replaceBank} onExport={exportBank} onRename={renameBank} onDelete={deleteBank} openId={selectedItem?.kind === "bank" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
     else if (tab.view === "groups") content = <GroupsTab query={searchQuery} onOpen={selectOrgItem} onNavigate={navigateToReferrer} onDelete={deleteGroup} openId={selectedItem?.kind === "group" ? selectedItem.id : null} safeMode={safeMode} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
     else if (tab.view === "players") content = <PlayersTab query={searchQuery} onOpen={selectOrgItem} onRename={renamePlayer} onDelete={deletePlayer} onClear={() => setSelectedItem(null)} openId={selectedItem?.kind === "player" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
-    else if (tab.view === "archives") content = <ArchivesTab query={searchQuery} onOpen={selectOrgItem} onActivate={openItem} onNavigate={navigateToReferrer} onClear={() => setSelectedItem(null)} openId={selectedItem?.kind === "archive" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
+    else if (tab.view === "archives") content = <ArchivesTab query={searchQuery} onOpen={selectOrgItem} onActivate={openItem} onNavigate={navigateToReferrer} onDelete={deleteWaveArchive} openId={selectedItem?.kind === "archive" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
     else if (tab.view === "files") content = <FilesTab query={searchQuery} onOpen={selectFile} onNavigate={navigateToReferrer} openId={selectedItem?.kind === "file" ? selectedItem.id : null} openFileIndex={selectedItem?.kind === "file" ? (selectedItem.item?.fileIndex ?? null) : null} />;
   } else if (tab.kind === "sound") {
     if (tab.item.type === "SEQ") {
@@ -4381,6 +4506,7 @@ function App() {
             onRenamePlayer={renamePlayer}
             onDeletePlayer={deletePlayer}
             onDeleteGroup={deleteGroup}
+            onDeleteArchive={deleteWaveArchive}
             onReplaceSound={requestSoundReplacement}
             onExportSound={exportSound}
             onReplaceWave={requestWaveArchiveReplacement}

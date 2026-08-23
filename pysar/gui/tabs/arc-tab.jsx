@@ -1,4 +1,4 @@
-function ArchivesTab({ onOpen, onActivate, onNavigate, onClear, openId, query, onDataRefresh, onDirty, onError }) {
+function ArchivesTab({ onOpen, onActivate, onNavigate, onDelete, openId, query, onDataRefresh, onDirty, onError }) {
   const D = window.PYSAR_DATA;
   const archives = D.waveArchives || [];
   const rows = filterByQuery(archives, query).filter((r) => {
@@ -57,45 +57,7 @@ function ArchivesTab({ onOpen, onActivate, onNavigate, onClear, openId, query, o
 
   async function deleteArchive() {
     if (!active) return;
-    if (!await window.pysarConfirm(`Delete ${active.name}?`, {
-      title: "Delete wave archive",
-      confirmLabel: "Delete",
-      danger: true,
-    })) return;
-    let result = await window.pysar.call("delete_wave_archive", active.id, false)
-      .catch((error) => ({ ok: false, error: String(error) }));
-    if (result?.requiresConfirmation) {
-      const names = (result.references || []).map((ref) => ref.name).slice(0, 6);
-      const extra = (result.references || []).length - names.length;
-      const detail = names.join(", ") + (extra > 0 ? ` (+${extra})` : "");
-      const confirmed = await window.pysarConfirm(
-        `${active.name} is used by ${detail}. Delete it and detach those references? ` +
-        "The linked banks/sounds will have no audio archive until repaired.",
-        {
-          title: "Detach references and delete",
-          confirmLabel: "Detach and delete",
-          danger: true,
-        },
-      );
-      if (!confirmed) return;
-      result = await window.pysar.call("delete_wave_archive", active.id, true)
-        .catch((error) => ({ ok: false, error: String(error) }));
-    }
-    if (!result?.ok) {
-      const message = result?.error || "Could not delete wave archive";
-      if (onError) onError(message);
-      else window.pysarAlert(message, { title: "Could not delete wave archive" });
-      return;
-    }
-    if (result.dirty) onDirty?.(true);
-    if (result.data) {
-      onDataRefresh?.(result.data);
-      const nextArchives = result.data.waveArchives || [];
-      const oldIndex = archives.findIndex((archive) => archive.id === active.id);
-      const next = nextArchives[Math.min(Math.max(0, oldIndex), nextArchives.length - 1)] || null;
-      if (next) onOpen?.({ kind: "archive", id: next.id, name: next.name, item: next });
-      else onClear?.();
-    }
+    await onDelete?.(active);
   }
 
   return (

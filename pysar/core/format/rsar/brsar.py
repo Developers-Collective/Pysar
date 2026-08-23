@@ -1678,19 +1678,117 @@ class Brsar(EditorBase):
             return None
         return replacement - (1 if replacement > wave_index else 0)
 
-    def delete_wave_archive(self, file_id: int, *, detach_references: bool = False) -> None:
-        """Delete an RWAR, optionally detaching data files that reference it."""
+    def reassign_wave_archive(self, file_id: int, replacement_file_id: int) -> None:
+        """Relink every dependent data file to a compatible replacement RWAR."""
         file_id = int(file_id)
+        replacement_file_id = int(replacement_file_id)
+        source_copy_ids = self._wave_archive_copy_ids(file_id)
+        if replacement_file_id in source_copy_ids:
+            raise BrsarError("Replacement wave archive must be different")
+        replacement = self._data.embedded_files.get(replacement_file_id)
+        if replacement is None or replacement.magic != "RWAR":
+            raise BrsarError(f"Embedded file {replacement_file_id} is not an RWAR")
+        replacement_war = Brwar.from_bytes(replacement.raw_data)
+        required, users = self._required_wave_archive_entries(file_id)
+        if len(replacement_war) < required:
+            detail = ", ".join(users) or "linked files"
+            raise BrsarError(
+                f"Replacement has {len(replacement_war)} waves, but {detail} "
+                f"requires at least {required}"
+            )
+
         self.require_wave_archive_delete(file_id)
-        logical_files = self.logical_file_indices_for_embedded(file_id)
-        copy_ids = self._wave_archive_copy_ids(file_id)
+        logical_files = self._wave_archive_logical_files(file_id)
+        source = self._data.embedded_files.get(file_id)
+        source_wave_count = len(Brwar.from_bytes(source.raw_data)) if source is not None else 0
+        standalone: list[tuple[int, int, int]] = []
+        paired: list[tuple[int, GroupTableEntry]] = []
+        for group_index, group in enumerate(self._data.group_entries):
+            for sub_index, sub in enumerate(group.group_table):
+                if sub.audio_file_id not in source_copy_ids:
+                    continue
+                logical_file = int(sub.group_index)
+                if sub.file_id is None:
+                    if self._safe_mode:
+                        self.require_safe_mutation(
+                            "deleting it", "group_item", group_index, logical_file,
+                        )
+                    standalone.append((group_index, sub_index, logical_file))
+                else:
+                    paired.append((logical_file, sub))
+
+        for logical_file, sub in paired:
+            sub.audio_file_id = replacement_file_id
+            sub.audio_data_offset = 0
+            sub.audio_data_size = len(replacement.raw_data)
+            if 0 <= logical_file < len(self._data.file_entries):
+                self._data.file_entries[logical_file].wave_file_size = len(replacement.raw_data)
+
+        for group_index, sub_index, logical_file in sorted(
+                standalone,
+                key=lambda item: (item[0], item[1]),
+                reverse=True,
+        ):
+            self._delete_group_table_entry(group_index, sub_index)
+            if (
+                0 <= logical_file < len(self._data.file_entries)
+                and not self._data.file_entries[logical_file].file_positions
+            ):
+                entry = self._data.file_entries[logical_file]
+                entry.file_size = 0
+                entry.wave_file_size = 0
+                entry.external_file_path = None
+                self.unregister_new("file", logical_file, recursive=True)
+
+        live_ids = {
+            int(embedded_id)
+            for group in self._data.group_entries
+            for sub in group.group_table
+            for embedded_id in (sub.file_id, sub.audio_file_id)
+            if embedded_id is not None
+        }
+        for copy_id in source_copy_ids - live_ids:
+            self._data.embedded_files.pop(copy_id, None)
+        for group in self._data.group_entries:
+            if group.audio_file_id in source_copy_ids:
+                remaining = [
+                    int(sub.audio_file_id)
+                    for sub in group.group_table
+                    if sub.audio_file_id is not None
+                    and sub.audio_file_id in self._data.embedded_files
+                ]
+                group.audio_file_id = min(remaining) if remaining else None
+        for logical_file in logical_files:
+            for wave_index in range(source_wave_count):
+                self.unregister_new("wave", logical_file, wave_index)
+        self._refresh_group_size_fields()
+        self.clear_subfile_caches()
+        self.mark_dirty(DirtyFlags.DATA)
+
+    def delete_wave_archive(
+            self,
+            file_id: int,
+            replacement_file_id: int | None = None,
+    ) -> int | None:
+        """Delete an RWAR, requiring relinking when live users remain."""
+        file_id = int(file_id)
         references = self.get_wave_archive_references(file_id)
         live_references = [ref for ref in references if ref["kind"] in {"bank", "sound", "file"}]
-        if live_references and not detach_references:
+        replacement = None if replacement_file_id is None else int(replacement_file_id)
+        if live_references and replacement is None:
             names = ", ".join(ref["name"] for ref in live_references[:4])
             if len(live_references) > 4:
                 names += f" (+{len(live_references) - 4})"
-            raise BrsarError(f"Wave archive is referenced by {names}")
+            raise BrsarError(
+                f"Wave archive is referenced by {names}; choose a compatible replacement"
+            )
+        if replacement is not None:
+            self.reassign_wave_archive(file_id, replacement)
+            return replacement
+
+        self.require_wave_archive_delete(file_id)
+        logical_files = self.logical_file_indices_for_embedded(file_id)
+        copy_ids = self._wave_archive_copy_ids(file_id)
 
         orphan_entries: list[tuple[int, int, int]] = []
         for group_index, group in enumerate(self._data.group_entries):
@@ -1729,6 +1827,7 @@ class Brsar(EditorBase):
         self._refresh_group_size_fields()
         self.clear_subfile_caches()
         self.mark_dirty(DirtyFlags.DATA)
+        return None
 
     def _append_file_to_group(
             self,

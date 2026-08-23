@@ -336,6 +336,7 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
   const [sourceText, setSourceText] = React.useState("");
   const [refreshRevision, setRefreshRevision] = React.useState(0);
   const [follow, setFollow] = React.useState(false);
+  const [scoreView, setScoreView] = React.useState(false);
   const [exportMenuOpen, setExportMenuOpen] = React.useState(false);
   const [lintState, setLintState] = React.useState({ status: "idle", error: "", line: null });
   const codeRef = React.useRef(null);
@@ -741,6 +742,7 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
                 title={safeModeBlocksEditing ? "Disable Safe Mode to edit this original sequence" : "Edit the BRSEQ MML source"}
               >Edit MML</Button>
             )}
+            {!editing && <Toggle on={scoreView} onChange={setScoreView} label="Score" />}
             {!editing && <Toggle on={follow} onChange={setFollow} label="Follow playhead" />}
           </div>
 
@@ -835,6 +837,16 @@ function SequenceDetail({ sound, editorSourceText = null, onEditorSourceCommit, 
             {lintState.status === "idle" && "MML validation ready"}
           </button>
         </div>
+      ) : scoreView ? (
+        <SequenceScoreView
+          soundId={sound.id}
+          revision={refreshRevision}
+          playheadMs={ownsPlayhead ? playheadMs : 0}
+          active={ownsPlayhead}
+          isPlaying={isThisPlaying}
+          follow={follow}
+          sequenceVariation={selectedVariation}
+        />
       ) : (
         <>
           <SequenceCodeView
