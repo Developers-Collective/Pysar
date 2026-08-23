@@ -159,6 +159,50 @@ function dataWithSoundPatch(data, soundPatch) {
   };
 }
 
+function dataWithSafeMode(data, enabled, documents = null) {
+  if (!data?.archive) return data;
+  const safeMode = enabled !== false;
+  const protect = (item) => item ? {
+    ...item,
+    protected: safeMode && item.isNew !== true,
+  } : item;
+  const activeDocumentId = data.activeDocumentId || null;
+  const nextDocuments = Array.isArray(documents)
+    ? documents
+    : (data.documents || []).map((document) => (
+      document.id === activeDocumentId ? { ...document, safeMode } : document
+    ));
+  return {
+    ...data,
+    archive: { ...data.archive, safeMode },
+    documents: nextDocuments,
+    sounds: (data.sounds || []).map((sound) => ({
+      ...protect(sound),
+      fileProtected: safeMode && sound.fileIsNew !== true,
+    })),
+    banks: (data.banks || []).map(protect),
+    groups: (data.groups || []).map((group) => ({
+      ...protect(group),
+      entries: (group.entries || []).map(protect),
+    })),
+    players: (data.players || []).map(protect),
+    waveArchives: (data.waveArchives || []).map(protect),
+    files: (data.files || []).map(protect),
+  };
+}
+
+function selectionWithSafeMode(selection, data, enabled) {
+  if (!selection?.item) return selection;
+  if (selection.kind !== "wave") return refreshedSelection(selection, data);
+  return {
+    ...selection,
+    item: {
+      ...selection.item,
+      protected: enabled !== false && selection.item.isNew !== true,
+    },
+  };
+}
+
 function selectedItemReference(selection) {
   if (!selection) return null;
   if (selection.kind === "wave") {
@@ -244,7 +288,7 @@ function AboutDialog({ appMeta, onClose, onError }) {
 
 function App() {
   window.PYSAR_DATA = window.PYSAR_DATA || { archive: null, activeDocumentId: null, documents: [], sounds: [], banks: [], groups: [], players: [], waveArchives: [], files: [] };
-  window.PYSAR_APP = window.PYSAR_APP || { name: "PYSAR - 1.0.0", version: "1.0.0", displayVersion: "1.0.0", phase: "Stable" };
+  window.PYSAR_APP = window.PYSAR_APP || { name: "PYSAR - 1.1.0", version: "1.1.0", displayVersion: "1.1.0", phase: "Stable" };
   const D = window.PYSAR_DATA;
   const [tw, setTwState] = useStateA({ ...APPEARANCE });
   const setTweak = useCallbackA((key, value) => setTwState((prev) => ({ ...prev, [key]: value })), []);
@@ -271,6 +315,7 @@ function App() {
     });
   }, []);
   const [loadingArchive, setLoadingArchive] = useStateA(false);
+  const [archiveLoadProgress, setArchiveLoadProgress] = useStateA(null);
   const archiveActivationRef = React.useRef(false);
   const [recentArchives, setRecentArchives] = useStateA([]);
   const [navView, setNavView] = useStateA("all"); // sidebar selection
@@ -286,6 +331,7 @@ function App() {
   const [draggingTabId, setDraggingTabId] = useStateA(null);
   const [dataRevision, setDataRevision] = useStateA(0);
   const [bankContentRevision, setBankContentRevision] = useStateA(0);
+  const [waveProtectionRevision, setWaveProtectionRevision] = useStateA(0);
 
   // dirty / unsaved state
   const [dirty, setDirty] = useStateA(false);
@@ -302,6 +348,7 @@ function App() {
   const [dumpStatus, setDumpStatus] = useStateA(null);
   const [menuOpen, setMenuOpen] = useStateA(null);
   const [showAbout, setShowAbout] = useStateA(false);
+  const [safeModeBusy, setSafeModeBusy] = useStateA(false);
   const bankMutationRef = React.useRef(false);
 
   // playback state
@@ -613,6 +660,16 @@ function App() {
         setUnsavedBusy(false);
         setWindowCloseInfo(payload || null);
         setUnsavedAction("window");
+        return;
+      }
+      if (type === "archive_load_progress" && payload) {
+        setArchiveLoadProgress({
+          name: String(payload.name || "Archive"),
+          detail: String(payload.detail || "Opening archive…"),
+          percent: Math.max(0, Math.min(100, Number(payload.percent) || 0)),
+          indeterminate: payload.indeterminate !== false,
+          failed: payload.failed === true,
+        });
         return;
       }
       if (type === "dump_progress" && payload) {
@@ -3034,28 +3091,50 @@ function App() {
     if (!window.pysar) return;
     setOpenError(null);
     setLoadingArchive(true);
+    setArchiveLoadProgress({
+      name: "Archive",
+      detail: "Waiting for an archive to be selected…",
+      percent: 0,
+      indeterminate: true,
+    });
     const result = await window.pysar.call("open_archive_dialog").catch((error) => ({ ok: false, error: String(error) }));
-    setLoadingArchive(false);
-    if (!result) return;
+    if (!result) {
+      setLoadingArchive(false);
+      setArchiveLoadProgress(null);
+      return;
+    }
     if (!result.ok) {
+      setLoadingArchive(false);
+      setArchiveLoadProgress(null);
       setOpenError(result.error || "Could not open archive");
       return;
     }
     acceptArchiveData(result.data, result.recentArchives);
+    setLoadingArchive(false);
+    setArchiveLoadProgress(null);
   }
 
   async function openRecentArchive(path) {
     if (!window.pysar || !path) return;
     setOpenError(null);
     setLoadingArchive(true);
+    setArchiveLoadProgress({
+      name: String(path).split(/[\\/]/).pop() || "Archive",
+      detail: "Opening archive…",
+      percent: 0,
+      indeterminate: true,
+    });
     const result = await window.pysar.call("load_archive", path).catch((error) => ({ ok: false, error: String(error) }));
-    setLoadingArchive(false);
     if (!result?.ok) {
+      setLoadingArchive(false);
+      setArchiveLoadProgress(null);
       setOpenError(result?.error || "Could not open recent archive");
       refreshRecentArchives();
       return;
     }
     acceptArchiveData(result.data, result.recentArchives);
+    setLoadingArchive(false);
+    setArchiveLoadProgress(null);
   }
 
   async function activateArchiveDocument(documentId) {
@@ -3063,11 +3142,22 @@ function App() {
     rememberActiveArchiveWorkspace();
     const cachedData = archiveDataByDocumentRef.current[documentId] || null;
     archiveActivationRef.current = true;
-    if (!cachedData) setLoadingArchive(true);
+    if (!cachedData) {
+      setLoadingArchive(true);
+      setArchiveLoadProgress({
+        name: documents.find((document) => document.id === documentId)?.name || "Archive",
+        detail: "Preparing archive workspace…",
+        percent: 0,
+        indeterminate: true,
+      });
+    }
     const result = await window.pysar.call("activate_archive", documentId, !cachedData)
       .catch((error) => ({ ok: false, error: String(error) }));
     archiveActivationRef.current = false;
-    if (!cachedData) setLoadingArchive(false);
+    if (!cachedData) {
+      setLoadingArchive(false);
+      setArchiveLoadProgress(null);
+    }
     if (!result?.ok) {
       setOpenError(result?.error || "Could not switch archives");
       return;
@@ -3141,6 +3231,42 @@ function App() {
         seqVariation: current.seqVariation,
       };
     });
+  }
+
+  function applySafeModeState(enabled, documentList) {
+    const data = dataWithSafeMode(window.PYSAR_DATA, enabled, documentList);
+    if (!data) {
+      setSafeMode(enabled !== false);
+      return;
+    }
+    window.PYSAR_DATA = data;
+    const documentId = data.activeDocumentId || activeDocumentIdRef.current;
+    if (documentId) archiveDataByDocumentRef.current[documentId] = data;
+    setSafeMode(enabled !== false);
+    setArchive(data.archive);
+    setDocuments(data.documents || []);
+    setTabs((current) => current.map((tabItem) => {
+      if (tabItem.kind === "view" || !tabItem.item) return tabItem;
+      const item = refreshedDataItem(tabItem.kind, tabItem.item, data);
+      return item === tabItem.item
+        ? tabItem
+        : { ...tabItem, item, title: item.name || item.label || tabItem.title };
+    }));
+    setSelectedItem((current) => selectionWithSafeMode(current, data, enabled));
+    setHistory((current) => current.map((entry) => ({
+      ...entry,
+      selectedItem: selectionWithSafeMode(entry.selectedItem, data, enabled),
+    })));
+    setPlayingSound((current) => {
+      const next = refreshedTransportSelection(current, data);
+      playingSoundRef.current = next;
+      return next;
+    });
+    // Detailed bank instruments and individual waves carry their own nested
+    // protection flags. Refresh those panels in the background without
+    // rebuilding the complete archive model on the bridge call.
+    setBankContentRevision((revision) => revision + 1);
+    setWaveProtectionRevision((revision) => revision + 1);
   }
 
   function invalidateSequencePlayback(soundId) {
@@ -4593,11 +4719,9 @@ function App() {
   }
 
   async function toggleSafeMode() {
-    if (!window.pysar || !archive) return;
+    if (!window.pysar || !archive || safeModeBusy) return;
     const enabled = !safeMode;
-    let result = await window.pysar.call("set_safe_mode", enabled, false)
-      .catch((error) => ({ ok: false, error: String(error) }));
-    if (result?.requiresConfirmation && !enabled) {
+    if (!enabled) {
       const confirmed = await window.pysarConfirm(
         "This permits deleting, renaming and reindexing " +
         "resources that belong to the original game. Some non-structural property " +
@@ -4609,15 +4733,19 @@ function App() {
         },
       );
       if (!confirmed) return;
-      result = await window.pysar.call("set_safe_mode", false, true)
+    }
+    setSafeModeBusy(true);
+    try {
+      const result = await window.pysar.call("set_safe_mode", enabled, !enabled)
         .catch((error) => ({ ok: false, error: String(error) }));
+      if (!result?.ok) {
+        setOpenError(result?.error || "Could not change Safe Mode");
+        return;
+      }
+      applySafeModeState(result.safeMode !== false, result.documents);
+    } finally {
+      setSafeModeBusy(false);
     }
-    if (!result?.ok) {
-      setOpenError(result?.error || "Could not change Safe Mode");
-      return;
-    }
-    setSafeMode(result.safeMode !== false);
-    if (result.data) handleDataRefresh(result.data);
   }
 
   // close menu on outside click
@@ -4790,7 +4918,7 @@ function App() {
         onExportWave={exportWaveArchiveSample}
         onReplaceWave={requestWaveArchiveReplacement}
         onDeleteWave={deleteWaveArchiveSample}
-        refreshRevision={dataRevision}
+        refreshRevision={dataRevision + waveProtectionRevision}
         onSelectWave={(it) => {
           setSelectedItem(it);
           queueWaveForPreview(it);
@@ -4987,6 +5115,7 @@ function App() {
           <button
             className={`tb-textbtn safe-mode-toggle ${safeMode ? "active" : "unsafe"}`}
             onClick={toggleSafeMode}
+            disabled={safeModeBusy || loadingArchive}
             title={safeMode
               ? "Original game identities are protected; click to unlock destructive edits"
               : "Original game identities may be renamed, deleted or reindexed; click to lock"}
@@ -5041,6 +5170,38 @@ function App() {
         >
           <span>{openError}</span>
           <button onClick={() => setOpenError(null)} aria-label="Dismiss error"><span aria-hidden="true">×</span></button>
+        </div>
+      )}
+
+      {loadingArchive && archiveLoadProgress && (
+        <div className="archive-load-overlay" role="status" aria-live="polite" aria-busy="true">
+          <div className="archive-load-card">
+            <div className="archive-load-heading">
+              <PysarIcon name="project.png" className="archive-load-icon" />
+              <div>
+                <strong>Opening {archiveLoadProgress.name || "archive"}</strong>
+                <span>{archiveLoadProgress.detail || "Preparing archive…"}</span>
+              </div>
+            </div>
+            <div
+              className={`archive-load-track${archiveLoadProgress.indeterminate ? " indeterminate" : ""}`}
+              role="progressbar"
+              aria-label="Archive loading progress"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow={archiveLoadProgress.indeterminate ? undefined : Math.round(archiveLoadProgress.percent || 0)}
+            >
+              <div
+                className="archive-load-fill"
+                style={archiveLoadProgress.indeterminate
+                  ? undefined
+                  : { width: `${Math.round(archiveLoadProgress.percent || 0)}%` }}
+              />
+            </div>
+            <div className="archive-load-percent">
+              {archiveLoadProgress.indeterminate ? "Reading…" : `${Math.round(archiveLoadProgress.percent || 0)}%`}
+            </div>
+          </div>
         </div>
       )}
 

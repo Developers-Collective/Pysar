@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pysar"
-version = "1.0.0"
+version = "1.1.0"
 description = "The first fully-fledged Nintendo Wii BRSAR editor"
 readme = "README.md"
 license = "MPL-2.0 AND MIT"

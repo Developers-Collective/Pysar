@@ -387,7 +387,12 @@ class PysarApi:
                 }
             self.session.safe_mode = enabled
             archive.set_safe_mode(enabled)
-            return {"ok": True, "safeMode": enabled, "data": self._ui_data()}
+            return {
+                "ok": True,
+                "safeMode": enabled,
+                "activeDocumentId": self._active_document_id,
+                "documents": self._archive_documents(),
+            }
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -404,11 +409,30 @@ class PysarApi:
         return self.load_archive(result[0])
 
     def load_archive(self, path: str) -> dict:
+        archive_name = Path(path).name or "archive"
+
+        def report_progress(
+                percent: int | None,
+                detail: str,
+                *,
+                failed: bool = False,
+        ) -> None:
+            self.push_event("archive_load_progress", {
+                "path": str(path),
+                "name": archive_name,
+                "percent": None if percent is None else max(0, min(100, int(percent))),
+                "indeterminate": percent is None,
+                "detail": str(detail),
+                "failed": bool(failed),
+            })
+
         try:
+            report_progress(None, f"Reading {archive_name}…")
             self._ensure_archive_documents()
             existing_id = self._document_using_path(path)
             if existing_id is None:
                 opened = self.project_service.open_archive(path)
+                report_progress(55, "Archive structure loaded")
                 document_id = uuid.uuid4().hex
                 self._archive_sessions[document_id] = opened
                 self._archive_document_order.append(document_id)
@@ -421,8 +445,11 @@ class PysarApi:
                 recent = self.recent_service.remember(path)
             except Exception:
                 recent = self.recent_service.list_archives()
-            return {"ok": True, "data": self._ui_data(), "recentArchives": recent}
+            data = self._ui_data(progress_callback=report_progress)
+            report_progress(100, f"Opened {archive_name}")
+            return {"ok": True, "data": data, "recentArchives": recent}
         except Exception as exc:
+            report_progress(None, f"Could not open {archive_name}", failed=True)
             return {"ok": False, "error": str(exc)}
 
     def get_recent_archives(self) -> dict:
@@ -7384,7 +7411,7 @@ class PysarApi:
             return {"ok": False, "error": str(exc)}
 
     def push_event(self, event_type: str, payload: Any) -> None:
-        if self._window is None:
+        if getattr(self, "_window", None) is None:
             return
         js = (
             "window.dispatchEvent(new CustomEvent('pysar-event', {detail: "
@@ -7393,7 +7420,18 @@ class PysarApi:
         )
         self._window.evaluate_js(js)
 
-    def _ui_data(self) -> dict[str, Any]:
+    def _ui_data(
+            self,
+            progress_callback: Callable[[int | None, str], None] | None = None,
+    ) -> dict[str, Any]:
+        def report_progress(percent: int, detail: str) -> None:
+            if progress_callback is None:
+                return
+            try:
+                progress_callback(percent, detail)
+            except Exception:
+                pass
+
         self._ensure_archive_documents()
         if self.session.archive is None:
             data = _empty_ui_data()
@@ -7404,7 +7442,9 @@ class PysarApi:
         archive_path = self.session.archive_path
         archive = self.session.archive
         archive.set_safe_mode(self.session.safe_mode)
+        report_progress(60, "Reading archive summary…")
         summary = self.archive_service.get_summary(self.session)
+        report_progress(64, "Indexing groups…")
         groups = []
         for item in self.archive_service.list_groups(self.session):
             group_entry = archive.data.group_entries[item.group_index]
@@ -7439,6 +7479,7 @@ class PysarApi:
                 "audioFileId": item.audio_file_id,
                 "entries": entries,
             })
+        report_progress(70, "Inspecting banks…")
         banks = [
             {
                 "id": item.bank_index,
@@ -7453,6 +7494,7 @@ class PysarApi:
             }
             for item in self.archive_service.list_banks(self.session)
         ]
+        report_progress(78, "Indexing players…")
         players = [
             {
                 "id": item.player_index,
@@ -7469,6 +7511,7 @@ class PysarApi:
         # reference an arbitrary physical wave archive directly.  Build the
         # valid RWAR choices once so the inspector only offers routes whose
         # paired RWSD contains the sound's current WSD slot.
+        report_progress(81, "Resolving wave-archive routes…")
         wave_archive_route_counts: dict[int, int] = {}
         for file_index in range(len(archive.data.file_entries)):
             raw = archive._resolve_file_raw(file_index)
@@ -7485,6 +7528,7 @@ class PysarApi:
             embedded = archive.data.embedded_files.get(int(audio_id))
             if embedded is not None and embedded.magic == "RWAR":
                 wave_archive_route_counts[int(audio_id)] = int(count)
+        report_progress(85, "Building the sound library…")
         sounds = []
         for item in self.archive_service.list_sounds(self.session):
             entry = archive.data.sound_entries[item.sound_id] if item.sound_id < len(archive.data.sound_entries) else None
@@ -7511,6 +7555,7 @@ class PysarApi:
                 "audioFileId": item.audio_file_id,
                 "isNew": archive.is_new("sound", item.sound_id),
                 "protected": archive.is_protected("sound", item.sound_id),
+                "fileIsNew": archive.is_new("file", item.file_index),
                 "fileProtected": archive.is_protected("file", item.file_index),
                 "fileReferenceCount": len(archive._users_of_file(item.file_index)),
             }
@@ -7530,6 +7575,7 @@ class PysarApi:
                     "trackFlags": int(entry.sound_info.alloc_track_flag or 0),
                 })
             sounds.append(sound_data)
+        report_progress(92, "Indexing wave archives…")
         wave_archives = [
             {
                 "id": item.file_id,
@@ -7551,6 +7597,7 @@ class PysarApi:
                 archive.is_new("file", file_index) for file_index in logical
             )
 
+        report_progress(96, "Resolving embedded files…")
         files = [
             {
                 "id": item.file_id,
@@ -7567,6 +7614,7 @@ class PysarApi:
             for item in self.archive_service.list_files(self.session)
         ]
 
+        report_progress(99, "Finalising the workspace…")
         path = Path(archive_path) if archive_path is not None else None
         return {
             "archive": {

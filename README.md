@@ -10,7 +10,7 @@
 
 Pysar is the first fully fledged editor for Nintendo Wii BRSAR archives! It gives streams, wave sounds, sequences, banks, players, groups, and wave archives a proper desktop interface, with playback and editing tools in the same place.
 
-Version 1.0 is the first stable release. But please be aware that it may still contain many annoying bugs. If you find a bug or have a question, please reach out to us on Discord:
+Version 1.1 is the current stable release. But please be aware that it may still contain annoying bugs. If you find a bug or have a question, please reach out to us on Discord:
 `@ogu_99` or `@nin0_`.
 
 This is an independent project and is not affiliated with or endorsed by Nintendo.
@@ -26,7 +26,6 @@ This is an independent project and is not affiliated with or endorsed by Nintend
 - Use safe mode while exploring, then explicitly enable archive-changing operations when you are ready.
 
 ## Downloading Pysar
-*Important note:  As of now, no built release exists. They will be available with Pysar v1.1.0. So for the time being, run it from source (and make sure to regularly pull the newest changes from the repo).*
 
 Ready-to-run builds are published on the [Releases page](https://github.com/Developers-Collective/Pysar/releases/latest) for 64-bit Windows and Linux.
 
