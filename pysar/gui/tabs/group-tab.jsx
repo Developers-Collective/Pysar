@@ -6,7 +6,7 @@ const GROUP_ENTRY_COLUMNS = [
   { key: "size", label: "Size", width: 112 },
 ];
 
-function GroupsTab({ onOpen, onNavigate, openId, query, safeMode = true, onSafetyChange, onDataRefresh, onDirty, onError }) {
+function GroupsTab({ onOpen, onNavigate, onDelete, openId, query, safeMode = true, onSafetyChange, onDataRefresh, onDirty, onError }) {
   const D = window.PYSAR_DATA;
   const rows = filterByQuery(D.groups, query);
   const activeGroup = D.groups.find((g) => g.id === openId) || rows[0] || D.groups[0] || null;
@@ -86,16 +86,7 @@ function GroupsTab({ onOpen, onNavigate, openId, query, safeMode = true, onSafet
 
   async function deleteGroup() {
     if (!activeGroup) return;
-    if (!await window.pysarConfirm(`Delete ${activeGroup.name}?`, {
-      title: "Delete group",
-      confirmLabel: "Delete",
-      danger: true,
-    })) return;
-    const deletedIndex = activeGroup.id;
-    const result = await commit("delete_group", [activeGroup.id]);
-    const nextGroups = result?.data?.groups || [];
-    const focused = nextGroups[Math.min(deletedIndex, nextGroups.length - 1)] || nextGroups[deletedIndex - 1] || null;
-    if (focused) onOpen?.({ kind: "group", id: focused.id, name: focused.name, item: focused });
+    await onDelete?.(activeGroup.id, activeGroup.name);
   }
 
   function activeSelectedFiles() {

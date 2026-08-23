@@ -15,7 +15,7 @@ import numpy as np
 from webview import FileDialog
 
 from pysar.core.exceptions import ArchiveDumpCancelled
-from pysar.core.model.brsar import FileEntry, SoundDataEntry, SoundType, StreamSoundInfo
+from pysar.core.model.brsar import FileEntry, SeqSoundInfo, SoundDataEntry, SoundType, StreamSoundInfo
 from pysar.discord_presence import DiscordPresence
 from pysar import __display_name__, __display_version__, __release_phase__, __version__
 from pysar.services import (
@@ -851,9 +851,10 @@ class PysarApi:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "data": self._wave_archive_details_payload(details)}
 
-    @staticmethod
-    def _wave_archive_details_payload(details) -> dict[str, Any]:
+    def _wave_archive_details_payload(self, details) -> dict[str, Any]:
         """Serialize one wave archive's live sample metadata for the UI."""
+        archive = self.project_service.require_archive(self.session)
+        logical_files = archive._wave_archive_logical_files(int(details.file_id))
         return {
             "fileId": details.file_id,
             "name": details.name,
@@ -870,6 +871,14 @@ class PysarApi:
                     "looped": w.is_looped,
                     "sizeBytes": w.size_bytes,
                     "durationMs": w.duration_ms,
+                    "isNew": bool(logical_files) and all(
+                        archive.is_new("wave", file_index, w.index)
+                        for file_index in logical_files
+                    ),
+                    "protected": not logical_files or any(
+                        archive.is_protected("wave", file_index, w.index)
+                        for file_index in logical_files
+                    ),
                 }
                 for w in details.waves
             ],
@@ -2970,6 +2979,59 @@ class PysarApi:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    def get_bank_delete_impact(self, bank_id: int) -> dict:
+        try:
+            archive = self.project_service.require_archive(self.session)
+            bank_id = int(bank_id)
+            if not 0 <= bank_id < len(archive.data.bank_entries):
+                raise ValueError(f"Invalid bank id {bank_id}")
+            target = archive.data.bank_entries[bank_id]
+            references = [
+                {
+                    "id": index,
+                    "name": self.archive_service._sound_name(archive, index, sound),
+                    "type": "SEQ",
+                }
+                for index, sound in enumerate(archive.data.sound_entries)
+                if sound.sound_type == SoundType.SEQ
+                and getattr(sound.sound_info, "bank_index", None) == bank_id
+            ]
+            replacements = []
+            for index, entry in enumerate(archive.data.bank_entries):
+                if index == bank_id:
+                    continue
+                name = (
+                    archive.data.names[entry.file_name_index]
+                    if 0 <= entry.file_name_index < len(archive.data.names)
+                    else f"BANK_{index:04d}"
+                )
+                replacements.append({
+                    "id": index,
+                    "name": name,
+                    "sharesFile": int(entry.file_index) == int(target.file_index),
+                })
+            replacements.sort(key=lambda item: (not item["sharesFile"], item["id"]))
+            file_index = int(target.file_index)
+            other_file_users = sum(
+                index != bank_id and int(entry.file_index) == file_index
+                for index, entry in enumerate(archive.data.bank_entries)
+            ) + sum(
+                int(sound.file_index) == file_index
+                for sound in archive.data.sound_entries
+            )
+            return {
+                "ok": True,
+                "references": references,
+                "replacements": replacements,
+                "backingFile": {
+                    "id": file_index,
+                    "name": f"RBNK/RWAR logical file #{file_index}",
+                    "willDelete": other_file_users == 0,
+                },
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def delete_bank(
             self,
             bank_id: int,
@@ -3025,10 +3087,14 @@ class PysarApi:
                     "replacementName": suggested_name,
                 }
 
-            replacement_new = archive.delete_bank(bank_id, replacement_bank_id)
+            with self.project_service.archive_transaction(
+                self.session,
+                f"Delete bank {bank_id}",
+                destructive=True,
+            ) as candidate:
+                replacement_new = candidate.delete_bank(bank_id, replacement_bank_id)
             self._clear_audio_streams()
             clear_wave_payload_cache()
-            self.project_service.mark_dirty(self.session)
             return {
                 "ok": True,
                 "dirty": True,
@@ -3822,12 +3888,107 @@ class PysarApi:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def delete_group(self, group_id: int) -> dict:
+    def get_group_delete_impact(self, group_id: int) -> dict:
         try:
             archive = self.project_service.require_archive(self.session)
-            archive.delete_group(int(group_id))
-            self.project_service.mark_dirty(self.session)
-            return {"ok": True, "dirty": True, "data": self._ui_data()}
+            group_id = int(group_id)
+            if not 0 <= group_id < len(archive.data.group_entries):
+                raise ValueError(f"Invalid group id {group_id}")
+            exclusive_files = archive.exclusive_group_files(group_id)
+            file_set = set(exclusive_files)
+            bank_ids = {
+                bank_id
+                for bank_id, bank in enumerate(archive.data.bank_entries)
+                if int(bank.file_index) in file_set
+            }
+            sound_ids = {
+                sound_id
+                for sound_id, sound in enumerate(archive.data.sound_entries)
+                if int(sound.file_index) in file_set
+                or (
+                    sound.sound_type == SoundType.SEQ
+                    and isinstance(sound.sound_info, SeqSoundInfo)
+                    and int(sound.sound_info.bank_index) in bank_ids
+                )
+            }
+
+            files = []
+            for file_index in exclusive_files:
+                raw = archive._resolve_file_raw(file_index)
+                kind = (
+                    raw[:4].decode("ascii", errors="replace")
+                    if raw is not None and len(raw) >= 4
+                    else "FILE"
+                )
+                files.append({
+                    "id": file_index,
+                    "fileIndex": file_index,
+                    "kind": kind,
+                    "name": f"{kind}_{file_index:04d}",
+                })
+            banks = []
+            for bank_id in sorted(bank_ids):
+                bank = archive.data.bank_entries[bank_id]
+                name = (
+                    archive.data.names[bank.file_name_index]
+                    if 0 <= bank.file_name_index < len(archive.data.names)
+                    else f"BANK_{bank_id:04d}"
+                )
+                banks.append({"id": bank_id, "name": name})
+            sounds = [
+                {
+                    "id": sound_id,
+                    "name": self.archive_service._sound_name(
+                        archive, sound_id, archive.data.sound_entries[sound_id]
+                    ),
+                    "type": archive.data.sound_entries[sound_id].sound_type.name,
+                }
+                for sound_id in sorted(sound_ids)
+            ]
+            replacements = []
+            for replacement_id, group in enumerate(archive.data.group_entries):
+                if replacement_id == group_id:
+                    continue
+                name = (
+                    archive.data.names[group.file_name_index]
+                    if 0 <= group.file_name_index < len(archive.data.names)
+                    else f"GROUP_{replacement_id:04d}"
+                )
+                replacements.append({"id": replacement_id, "name": name})
+            return {
+                "ok": True,
+                "files": files,
+                "banks": banks,
+                "sounds": sounds,
+                "replacements": replacements,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def delete_group(
+            self,
+            group_id: int,
+            replacement_group_id: int | None = None,
+    ) -> dict:
+        try:
+            group_id = int(group_id)
+            replacement = (
+                None if replacement_group_id is None else int(replacement_group_id)
+            )
+            with self.project_service.archive_transaction(
+                self.session,
+                f"Delete group {group_id}",
+                destructive=True,
+            ) as candidate:
+                replacement_new = candidate.delete_group(group_id, replacement)
+            self._clear_audio_streams()
+            clear_wave_payload_cache()
+            return {
+                "ok": True,
+                "dirty": True,
+                "replacementGroupId": replacement_new,
+                "data": self._ui_data(),
+            }
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -3968,7 +4129,12 @@ class PysarApi:
             return {"ok": False, "error": str(exc)}
 
     @staticmethod
-    def _replacement_brwav_from_path(path: str, encoding: str | None = None):
+    def _replacement_brwav_from_path(
+            path: str,
+            encoding: str | None = None,
+            looped: bool | None = None,
+            loop_start: int = 0,
+    ):
         """Load raw BRWAV input or encode WAV input using the requested codec."""
         from pysar.core.format.rwav import Brwav
         from pysar.core.types import AudioCodec
@@ -3978,7 +4144,10 @@ class PysarApi:
             raise ValueError(f"Replacement file does not exist: {source}")
         suffix = source.suffix.lower()
         if suffix == ".brwav":
-            return Brwav.from_bytes(source.read_bytes())
+            wave = Brwav.from_bytes(source.read_bytes())
+            if looped is not None:
+                wave.set_loop(bool(looped), int(loop_start))
+            return wave
         if suffix == ".wav":
             try:
                 target_codec = AudioCodec[str(encoding or "").strip().upper()]
@@ -3986,7 +4155,11 @@ class PysarApi:
                 raise ValueError(
                     "Choose an RWAV encoding for the WAV import: ADPCM, PCM16, or PCM8"
                 ) from exc
-            return Brwav.from_wav(source, encoding=target_codec)
+            return Brwav.from_wav(
+                source,
+                encoding=target_codec,
+                loop_start=int(loop_start) if bool(looped) else -1,
+            )
         raise ValueError("Choose a .brwav or uncompressed mono .wav file")
 
     def _choose_brwav_replacement_source(self) -> tuple[Path, str] | None:
@@ -4002,12 +4175,37 @@ class PysarApi:
             raise ValueError("Choose a .brwav or uncompressed mono .wav file")
         return source, "WAV" if suffix == ".wav" else "BRWAV"
 
+    @staticmethod
+    def _brwav_source_options(source: Path, source_format: str) -> dict[str, Any]:
+        """Return loop defaults and sample bounds for the import dialog."""
+        if source_format == "BRWAV":
+            from pysar.core.format.rwav import Brwav
+
+            wave = Brwav.from_bytes(source.read_bytes())
+            return {
+                "looped": bool(wave.is_looped),
+                "loopStart": int(wave.loop_start if wave.is_looped else 0),
+                "samples": int(wave.n_samples),
+                "encoding": wave.encoding.name,
+            }
+        import wave as wave_module
+
+        with wave_module.open(str(source), "rb") as wav:
+            return {
+                "looped": False,
+                "loopStart": 0,
+                "samples": int(wav.getnframes()),
+                "encoding": None,
+            }
+
     def replace_wave_archive_sample_from_path(
         self,
         file_id: int,
         wave_index: int,
         path: str,
         encoding: str | None = None,
+        looped: bool | None = None,
+        loop_start: int = 0,
     ) -> dict:
         """Replace one BRWAR entry while retaining all BRSAR copy metadata.
 
@@ -4015,17 +4213,28 @@ class PysarApi:
         encoded using the explicitly selected target codec.
         """
         try:
-            replacement = self._replacement_brwav_from_path(path, encoding)
+            replacement = self._replacement_brwav_from_path(
+                path, encoding, looped, loop_start,
+            )
 
             archive, brwar, _old_wave = self._wave_archive_sample(file_id, wave_index)
             file_id = int(file_id)
             wave_index = int(wave_index)
+            logical_files = archive._wave_archive_logical_files(file_id)
+            if archive.safe_mode and not logical_files:
+                raise ValueError("Safe Mode cannot establish this sample's provenance")
+            for logical_file in logical_files:
+                archive.require_safe_mutation(
+                    "replacing it", "wave", logical_file, wave_index,
+                )
             brwar.replace(wave_index, replacement)
-            # Reuse the archive-level replacement path: it updates every
-            # physical RWAR copy and every dependent FILE/GROUP size field.
-            archive.replace_wave_archive(file_id, brwar.to_bytes())
+            with self.project_service.archive_transaction(
+                self.session,
+                f"Replace BRWAV {file_id}:{wave_index}",
+            ) as candidate:
+                candidate.replace_wave_archive(file_id, brwar.to_bytes())
             self._clear_audio_streams()
-            self.project_service.mark_dirty(self.session)
+            clear_wave_payload_cache()
 
             details = self._wave_archive_details_payload(
                 self.archive_service.get_wave_archive_details(self.session, file_id)
@@ -4036,6 +4245,182 @@ class PysarApi:
                 "fileId": file_id,
                 "waveIndex": wave_index,
                 "wave": details["waves"][wave_index],
+                "data": self._ui_data(),
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def update_wave_archive_sample(
+            self,
+            file_id: int,
+            wave_index: int,
+            patch: dict,
+    ) -> dict:
+        """Update editable loop metadata for one BRWAV."""
+        try:
+            archive, brwar, wave = self._wave_archive_sample(file_id, wave_index)
+            file_id = int(file_id)
+            wave_index = int(wave_index)
+            logical_files = archive._wave_archive_logical_files(file_id)
+            if archive.safe_mode and not logical_files:
+                raise ValueError("Safe Mode cannot establish this sample's provenance")
+            for logical_file in logical_files:
+                archive.require_safe_mutation(
+                    "editing it", "wave", logical_file, wave_index,
+                )
+            looped = bool(patch.get("looped", wave.is_looped))
+            loop_start = int(
+                patch.get("loopStart", wave.loop_start if wave.is_looped else 0)
+            )
+            wave.set_loop(looped, loop_start)
+            brwar.replace(wave_index, wave)
+            with self.project_service.archive_transaction(
+                self.session,
+                f"Edit BRWAV {file_id}:{wave_index}",
+            ) as candidate:
+                candidate.replace_wave_archive(file_id, brwar.to_bytes())
+            self._clear_audio_streams()
+            clear_wave_payload_cache()
+            details = self._wave_archive_details_payload(
+                self.archive_service.get_wave_archive_details(self.session, file_id)
+            )
+            return {
+                "ok": True,
+                "dirty": True,
+                "fileId": file_id,
+                "waveIndex": wave_index,
+                "wave": details["waves"][wave_index],
+                "data": self._ui_data(),
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def add_wave_archive_sample_from_path(
+            self,
+            file_id: int,
+            path: str,
+            encoding: str | None = None,
+            looped: bool | None = None,
+            loop_start: int = 0,
+    ) -> dict:
+        """Append a BRWAV or encoded WAV to an existing BRWAR."""
+        try:
+            wave = self._replacement_brwav_from_path(
+                path, encoding, looped, loop_start,
+            )
+            archive = self.project_service.require_archive(self.session)
+            file_id = int(file_id)
+            embedded = archive.data.embedded_files.get(file_id)
+            if embedded is None or embedded.magic != "RWAR":
+                raise ValueError(f"Embedded file {file_id} is not an RWAR")
+            from pysar.core.format.rwar import Brwar
+
+            brwar = Brwar.from_bytes(embedded.raw_data)
+            wave_index = brwar.add(wave)
+            logical_files = archive._wave_archive_logical_files(file_id)
+            with self.project_service.archive_transaction(
+                self.session,
+                f"Add BRWAV {file_id}:{wave_index}",
+            ) as candidate:
+                candidate.replace_wave_archive(file_id, brwar.to_bytes())
+                for logical_file in logical_files:
+                    candidate.register_new("wave", logical_file, wave_index)
+            self._clear_audio_streams()
+            clear_wave_payload_cache()
+            details = self._wave_archive_details_payload(
+                self.archive_service.get_wave_archive_details(self.session, file_id)
+            )
+            return {
+                "ok": True,
+                "dirty": True,
+                "fileId": file_id,
+                "waveIndex": wave_index,
+                "wave": details["waves"][wave_index],
+                "data": self._ui_data(),
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def choose_wave_archive_sample_import_source_dialog(self, file_id: int) -> dict:
+        """Choose a BRWAV/WAV source to append to an existing BRWAR."""
+        try:
+            archive = self.project_service.require_archive(self.session)
+            embedded = archive.data.embedded_files.get(int(file_id))
+            if embedded is None or embedded.magic != "RWAR":
+                raise ValueError(f"Embedded file {int(file_id)} is not an RWAR")
+            selection = self._choose_brwav_replacement_source()
+            if selection is None:
+                return {"ok": False, "error": "Cancelled"}
+            source, source_format = selection
+            return {
+                "ok": True,
+                "fileId": int(file_id),
+                "path": str(source),
+                "sourceFormat": source_format,
+                **self._brwav_source_options(source, source_format),
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def get_wave_archive_sample_delete_impact(
+            self,
+            file_id: int,
+            wave_index: int,
+    ) -> dict:
+        try:
+            archive, brwar, _wave = self._wave_archive_sample(file_id, wave_index)
+            references = archive.get_wave_archive_sample_references(file_id, wave_index)
+            replacements = [
+                {"id": index, "name": f"BRWAV #{index}"}
+                for index in range(len(brwar))
+                if index != int(wave_index)
+            ]
+            return {
+                "ok": True,
+                "references": references,
+                "replacements": replacements,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def delete_wave_archive_sample(
+            self,
+            file_id: int,
+            wave_index: int,
+            replacement_wave_index: int | None = None,
+    ) -> dict:
+        try:
+            file_id = int(file_id)
+            wave_index = int(wave_index)
+            replacement = (
+                None if replacement_wave_index is None else int(replacement_wave_index)
+            )
+            with self.project_service.archive_transaction(
+                self.session,
+                f"Delete BRWAV {file_id}:{wave_index}",
+                destructive=True,
+            ) as candidate:
+                replacement_new = candidate.delete_wave_archive_sample(
+                    file_id, wave_index, replacement,
+                )
+            self._clear_audio_streams()
+            clear_wave_payload_cache()
+            details = self._wave_archive_details_payload(
+                self.archive_service.get_wave_archive_details(self.session, file_id)
+            )
+            next_index = (
+                replacement_new
+                if replacement_new is not None
+                else (min(wave_index, len(details["waves"]) - 1) if details["waves"] else None)
+            )
+            return {
+                "ok": True,
+                "dirty": True,
+                "fileId": file_id,
+                "deletedWaveIndex": wave_index,
+                "replacementWaveIndex": replacement_new,
+                "waveIndex": next_index,
+                "wave": None if next_index is None else details["waves"][next_index],
                 "data": self._ui_data(),
             }
         except Exception as exc:
@@ -4055,6 +4440,7 @@ class PysarApi:
                 "waveIndex": int(wave_index),
                 "path": str(source),
                 "sourceFormat": source_format,
+                **self._brwav_source_options(source, source_format),
             }
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -4282,6 +4668,37 @@ class PysarApi:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    def get_player_delete_impact(self, player_id: int) -> dict:
+        try:
+            archive = self.project_service.require_archive(self.session)
+            player_id = int(player_id)
+            if not 0 <= player_id < len(archive.data.player_entries):
+                raise ValueError(f"Invalid player id {player_id}")
+            references = [
+                {
+                    "id": index,
+                    "name": self.archive_service._sound_name(archive, index, sound),
+                    "type": sound.sound_type.name,
+                }
+                for index, sound in enumerate(archive.data.sound_entries)
+                if int(sound.player_index) == player_id
+            ]
+            replacements = [
+                {
+                    "id": index,
+                    "name": self._player_json_payload(archive, index)["name"],
+                }
+                for index in range(len(archive.data.player_entries))
+                if index != player_id
+            ]
+            return {
+                "ok": True,
+                "references": references,
+                "replacements": replacements,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def delete_player(self, player_id: int, replacement_player_id: int | None = None) -> dict:
         try:
             archive = self.project_service.require_archive(self.session)
@@ -4310,8 +4727,12 @@ class PysarApi:
                     "suggestedReplacement": suggested,
                     "replacementName": replacement_name,
                 }
-            archive.delete_player(player_id, replacement_player_id)
-            self.project_service.mark_dirty(self.session)
+            with self.project_service.archive_transaction(
+                self.session,
+                f"Delete player {player_id}",
+                destructive=True,
+            ) as candidate:
+                candidate.delete_player(player_id, replacement_player_id)
             return {"ok": True, "dirty": True, "data": self._ui_data()}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}

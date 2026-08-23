@@ -240,6 +240,50 @@ class Brwav(EditorBase):
         """Loop start sample."""
         return self._data.wave_info.get_loop_start_samples()
 
+    def set_loop(self, looped: bool, loop_start: int = 0) -> None:
+        """Update loop metadata, including the ADPCM decoder loop context."""
+        info = self._data.wave_info
+        enabled = bool(looped)
+        start = max(0, int(loop_start))
+        if enabled and (self.n_samples <= 0 or start >= self.n_samples):
+            raise ValueError(
+                f"Loop start must be between 0 and {max(0, self.n_samples - 1)}"
+            )
+        info.is_looped = enabled
+        info.loop_start = (
+            WaveInfo.sample_to_nibble(start)
+            if info.encoding == AudioCodec.ADPCM
+            else start
+        ) if enabled else 0
+
+        if info.encoding == AudioCodec.ADPCM:
+            for channel_index, params in enumerate(info.adpcm_params):
+                offset = (
+                    int(info.channels[channel_index].data_offset)
+                    if channel_index < len(info.channels) else 0
+                )
+                channel_data = self._data.sample_data[max(0, offset):]
+                if enabled and start > 0:
+                    coefficient_pairs = list(zip(params.coefs[::2], params.coefs[1::2]))
+                    _scale, loop_yn1, loop_yn2 = compute_loop_context(
+                        channel_data, start, coefficient_pairs,
+                    )
+                    header_offset = (start // 14) * 8
+                    params.loop_pred_scale = (
+                        int(channel_data[header_offset])
+                        if header_offset < len(channel_data) else int(params.pred_scale)
+                    )
+                    params.loop_yn1 = loop_yn1
+                    params.loop_yn2 = loop_yn2
+                else:
+                    params.loop_pred_scale = int(params.pred_scale)
+                    params.loop_yn1 = 0
+                    params.loop_yn2 = 0
+        # Untouched BRWAVs may preserve their original raw blob. Metadata edits
+        # must force the writer to rebuild it.
+        self._data.raw_bytes = None
+        self.mark_dirty(DirtyFlags.ALL)
+
     @property
     def duration(self) -> float:
         """Duration in seconds."""

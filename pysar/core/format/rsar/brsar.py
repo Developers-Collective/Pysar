@@ -1077,11 +1077,58 @@ class Brsar(EditorBase):
         self.mark_dirty(DirtyFlags.DATA)
         return group_index
 
-    def delete_group(self, group_index: int) -> None:
+    def exclusive_group_files(self, group_index: int) -> list[int]:
+        """Return logical files whose final load location is this group."""
+        group_index = int(group_index)
+        if group_index < 0 or group_index >= len(self._data.group_entries):
+            raise BrsarError(f"Invalid group_index {group_index}")
+        source_files = {
+            int(sub.group_index)
+            for sub in self._data.group_entries[group_index].group_table
+        }
+        return sorted(
+            file_index
+            for file_index in source_files
+            if not any(
+                other_index != group_index
+                and any(int(sub.group_index) == file_index for sub in group.group_table)
+                for other_index, group in enumerate(self._data.group_entries)
+            )
+        )
+
+    def delete_group(
+            self,
+            group_index: int,
+            replacement_group_index: int | None = None,
+    ) -> int | None:
+        """Delete a group without silently orphaning its logical files.
+
+        Files for which this is the final load group must be moved to an
+        explicit replacement. Files already present in another group need no
+        repair and are simply detached from the deleted group.
+        """
         group_index = int(group_index)
         if group_index < 0 or group_index >= len(self._data.group_entries):
             raise BrsarError(f"Invalid group_index {group_index}")
         self.require_safe_deletion("group", group_index)
+
+        replacement = (
+            None if replacement_group_index is None else int(replacement_group_index)
+        )
+        if replacement is not None and (
+            replacement < 0
+            or replacement >= len(self._data.group_entries)
+            or replacement == group_index
+        ):
+            raise BrsarError("Replacement group is invalid")
+        exclusive_files = self.exclusive_group_files(group_index)
+        if exclusive_files and replacement is None:
+            raise BrsarError(
+                "This group is the final load location of one or more files; "
+                "choose a replacement group"
+            )
+        if exclusive_files:
+            self.move_files_to_group(exclusive_files, replacement)
 
         del self._data.group_entries[group_index]
         for file_entry in self._data.file_entries:
@@ -1096,6 +1143,9 @@ class Brsar(EditorBase):
         self._rebuild_group_trie()
         self._refresh_group_size_fields()
         self.mark_dirty(DirtyFlags.DATA)
+        if replacement is None:
+            return None
+        return replacement - 1 if replacement > group_index else replacement
 
     def reorder_groups(self, group_indices: list[int]) -> None:
         if len(group_indices) != len(self._data.group_entries):
@@ -1467,6 +1517,166 @@ class Brsar(EditorBase):
         self.clear_subfile_caches()
         self.mark_dirty(DirtyFlags.DATA)
         return len(brwar)
+
+    def get_wave_archive_sample_references(
+            self,
+            file_id: int,
+            wave_index: int,
+    ) -> list[dict[str, Any]]:
+        """Return every RBNK/RWSD location that directly uses one BRWAV."""
+        from pysar.core.format.rbnk import Brbnk
+
+        file_id = int(file_id)
+        wave_index = int(wave_index)
+        references: list[dict[str, Any]] = []
+        for file_index in sorted(self._wave_archive_logical_files(file_id)):
+            raw = self._resolve_file_raw(file_index)
+            if raw is None:
+                continue
+            if raw[:4] == b"RBNK":
+                bank = Brbnk.from_bytes(raw)
+                for program, instrument in enumerate(bank.instruments):
+                    for zone, (param, _keys, _velocities) in enumerate(
+                            instrument.get_all_inst_params(),
+                    ):
+                        if int(param.wave_index) == wave_index:
+                            references.append({
+                                "kind": "bank-zone",
+                                "fileIndex": file_index,
+                                "program": program,
+                                "zoneIndex": zone,
+                                "name": (
+                                    f"RBNK file {file_index}, program {program}, "
+                                    f"zone {zone}"
+                                ),
+                            })
+            elif raw[:4] == b"RWSD":
+                wsd = Brwsd.from_bytes(raw)
+                for sound_index, wave_sound in enumerate(wsd.wave_sounds):
+                    for note_index, note in enumerate(wave_sound.notes):
+                        if int(note.wave_index) == wave_index:
+                            references.append({
+                                "kind": "wsd-note",
+                                "fileIndex": file_index,
+                                "soundIndex": sound_index,
+                                "noteIndex": note_index,
+                                "name": (
+                                    f"RWSD file {file_index}, sound {sound_index}, "
+                                    f"note {note_index}"
+                                ),
+                            })
+        return references
+
+    def delete_wave_archive_sample(
+            self,
+            file_id: int,
+            wave_index: int,
+            replacement_wave_index: int | None = None,
+    ) -> int | None:
+        """Delete one BRWAV and repair every remaining RBNK/RWSD index.
+
+        Referenced samples require an explicit replacement expressed in the
+        pre-delete index space. Unreferenced samples may be removed directly;
+        references to later samples are shifted automatically.
+        """
+        from pysar.core.format.rbnk import Brbnk
+
+        file_id = int(file_id)
+        wave_index = int(wave_index)
+        logical_files = self._wave_archive_logical_files(file_id)
+        copy_ids = self._wave_archive_copy_ids(file_id)
+        embedded = self._data.embedded_files.get(file_id)
+        if embedded is None or embedded.magic != "RWAR":
+            raise BrsarError(f"Embedded file {file_id} is not an RWAR")
+        brwar = Brwar.from_bytes(embedded.raw_data)
+        if not 0 <= wave_index < len(brwar):
+            raise BrsarError(f"Invalid BRWAV index {wave_index}")
+
+        replacement = (
+            None if replacement_wave_index is None else int(replacement_wave_index)
+        )
+        if replacement is not None and (
+            not 0 <= replacement < len(brwar) or replacement == wave_index
+        ):
+            raise BrsarError("Replacement BRWAV index is invalid")
+        if self._safe_mode and not logical_files:
+            raise BrsarError("Safe Mode cannot establish this sample's provenance")
+
+        for file_index in logical_files:
+            self.require_safe_mutation(
+                "deleting it", "wave", file_index, wave_index,
+            )
+            if self._safe_mode and any(
+                self.is_protected("wave", file_index, later)
+                for later in range(wave_index + 1, len(brwar))
+            ):
+                raise BrsarError(
+                    "Safe Mode cannot delete this sample because doing so would "
+                    "reindex later original samples"
+                )
+
+        direct_references = self.get_wave_archive_sample_references(file_id, wave_index)
+        if direct_references and replacement is None:
+            raise BrsarError(
+                "The BRWAV is referenced; choose a replacement sample before deleting it"
+            )
+
+        data_updates: list[tuple[int, bytes, str]] = []
+        for file_index in sorted(logical_files):
+            raw = self._resolve_file_raw(file_index)
+            if raw is None:
+                continue
+            changed = False
+            if raw[:4] == b"RBNK":
+                bank = Brbnk.from_bytes(raw)
+                for instrument in bank.instruments:
+                    for param, _keys, _velocities in instrument.get_all_inst_params():
+                        current = int(param.wave_index)
+                        if current == wave_index and replacement is not None:
+                            param.wave_index = replacement - (1 if replacement > wave_index else 0)
+                            changed = True
+                        elif current > wave_index:
+                            param.wave_index = current - 1
+                            changed = True
+                if changed:
+                    data_updates.append((file_index, bank.to_bytes(), "RBNK"))
+            elif raw[:4] == b"RWSD":
+                wsd = Brwsd.from_bytes(raw)
+                for wave_sound in wsd.wave_sounds:
+                    for note in wave_sound.notes:
+                        current = int(note.wave_index)
+                        if current == wave_index and replacement is not None:
+                            note.wave_index = replacement - (1 if replacement > wave_index else 0)
+                            changed = True
+                        elif current > wave_index:
+                            note.wave_index = current - 1
+                            changed = True
+                if changed:
+                    data_updates.append((file_index, wsd.to_bytes(), "RWSD"))
+
+        brwar.remove(wave_index)
+        serialized_war = brwar.to_bytes()
+        for file_index, raw, magic in data_updates:
+            self._update_all_file_copies(file_index, raw, expected_magic=magic)
+        for copy_id in copy_ids:
+            self._data.embedded_files[copy_id].raw_data = serialized_war
+        for group in self._data.group_entries:
+            for sub in group.group_table:
+                if sub.audio_file_id in copy_ids:
+                    sub.audio_data_size = len(serialized_war)
+                    logical_index = int(sub.group_index)
+                    if 0 <= logical_index < len(self._data.file_entries):
+                        self._data.file_entries[logical_index].wave_file_size = len(serialized_war)
+        for file_index in logical_files:
+            self.remap_child_provenance_after_delete(
+                "wave", (file_index,), wave_index,
+            )
+        self._refresh_group_size_fields()
+        self.clear_subfile_caches()
+        self.mark_dirty(DirtyFlags.DATA)
+        if replacement is None:
+            return None
+        return replacement - (1 if replacement > wave_index else 0)
 
     def delete_wave_archive(self, file_id: int, *, detach_references: bool = False) -> None:
         """Delete an RWAR, optionally detaching data files that reference it."""

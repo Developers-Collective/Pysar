@@ -3105,7 +3105,14 @@ function App() {
     }
   }
 
-  async function replaceWaveArchiveSample(archiveId, waveIndex, path, encoding = null) {
+  async function replaceWaveArchiveSample(
+    archiveId,
+    waveIndex,
+    path,
+    encoding = null,
+    looped = null,
+    loopStart = 0,
+  ) {
     if (!window.pysar || archiveId == null || waveIndex == null || !path) return;
     const result = await window.pysar.call(
       "replace_wave_archive_sample_from_path",
@@ -3113,6 +3120,8 @@ function App() {
       waveIndex,
       path,
       encoding,
+      looped,
+      loopStart,
     )
       .catch((error) => ({ ok: false, error: String(error) }));
     if (!result?.ok) {
@@ -3131,6 +3140,182 @@ function App() {
       handleDataRefresh(result.data);
       refreshSelectedWave(result.data, archiveId, result.wave);
     }
+  }
+
+  function selectArchiveWave(data, archiveId, wave) {
+    if (!data) return;
+    const fileId = Number(archiveId);
+    const archiveItem = (data.waveArchives || []).find((item) => Number(item.id) === fileId);
+    if (!archiveItem) return;
+    if (!wave) {
+      setSelectedItem({ kind: "archive", id: archiveItem.id, name: archiveItem.name, item: archiveItem });
+      return;
+    }
+    const waveIndex = Number(wave.index);
+    setSelectedItem({
+      kind: "wave",
+      id: waveIndex,
+      name: `${archiveItem.name} · #${waveIndex}`,
+      item: {
+        ...wave,
+        archiveId: fileId,
+        archiveName: archiveItem.name,
+        waveIndex,
+        index: waveIndex,
+      },
+    });
+  }
+
+  async function addWaveArchiveSample(
+    archiveId,
+    path,
+    encoding = null,
+    looped = null,
+    loopStart = 0,
+  ) {
+    if (!window.pysar || archiveId == null || !path) return false;
+    const result = await window.pysar.call(
+      "add_wave_archive_sample_from_path",
+      archiveId,
+      path,
+      encoding,
+      looped,
+      loopStart,
+    ).catch((error) => ({ ok: false, error: String(error) }));
+    if (!result?.ok) {
+      if (result?.error !== "Cancelled") setOpenError(result?.error || "Could not add BRWAV");
+      return false;
+    }
+    stop();
+    if (result.dirty) setDirty(true);
+    if (result.data) {
+      handleDataRefresh(result.data);
+      selectArchiveWave(result.data, archiveId, result.wave);
+    }
+    return true;
+  }
+
+  async function requestWaveArchiveImport(archiveId) {
+    if (!window.pysar || archiveId == null) return;
+    const selection = await window.pysar.call(
+      "choose_wave_archive_sample_import_source_dialog",
+      archiveId,
+    ).catch((error) => ({ ok: false, error: String(error) }));
+    if (!selection?.ok) {
+      if (selection?.error !== "Cancelled") setOpenError(selection?.error || "Could not choose a BRWAV");
+      return;
+    }
+    const archiveItem = (window.PYSAR_DATA.waveArchives || []).find(
+      (item) => Number(item.id) === Number(archiveId),
+    );
+    setReplaceWaveTarget({
+      kind: "archive",
+      operation: "add",
+      archiveId: Number(archiveId),
+      archiveName: archiveItem?.name,
+      path: selection.path,
+      sourceFormat: selection.sourceFormat,
+      encoding: selection.encoding,
+      looped: selection.looped,
+      loopStart: selection.loopStart,
+      samples: selection.samples,
+    });
+  }
+
+  async function updateWaveArchiveSample(archiveId, waveIndex, patch) {
+    if (!window.pysar || archiveId == null || waveIndex == null) return false;
+    const result = await window.pysar.call(
+      "update_wave_archive_sample", archiveId, waveIndex, patch,
+    ).catch((error) => ({ ok: false, error: String(error) }));
+    if (!result?.ok) {
+      setOpenError(result?.error || "Could not update BRWAV");
+      return false;
+    }
+    stop();
+    if (result.dirty) setDirty(true);
+    if (result.data) {
+      handleDataRefresh(result.data);
+      refreshSelectedWave(result.data, archiveId, result.wave);
+    }
+    return true;
+  }
+
+  async function deleteWaveArchiveSample(archiveId, waveIndex) {
+    if (!window.pysar || archiveId == null || waveIndex == null) return false;
+    const impact = await window.pysar.call(
+      "get_wave_archive_sample_delete_impact", archiveId, waveIndex,
+    ).catch((error) => ({ ok: false, error: String(error) }));
+    if (!impact?.ok) {
+      setOpenError(impact?.error || "Could not inspect BRWAV references");
+      return false;
+    }
+    const references = impact.references || [];
+    const replacements = impact.replacements || [];
+    if (references.length && !replacements.length) {
+      await window.pysarAlert(
+        "This is the only sample in the archive and it is still referenced. Add another sample before deleting it.",
+        { title: "BRWAV cannot be deleted" },
+      );
+      return false;
+    }
+    const action = references.length ? {
+      id: "reassign",
+      label: "Reassign and delete",
+      description: "Move every bank-zone and RWSD-note reference to the selected sample.",
+      confirmLabel: "Reassign and delete",
+      tone: "danger",
+      selection: {
+        label: "Replacement sample",
+        options: replacements.map((item) => ({ value: item.id, label: item.name })),
+      },
+    } : {
+      id: "delete",
+      label: "Delete sample",
+      description: "No bank zone or RWSD note directly references this sample.",
+      confirmLabel: "Delete sample",
+      tone: "danger",
+    };
+    const actionId = action.id;
+    const choice = await window.pysarConsequence(`Delete BRWAV #${waveIndex}?`, {
+      title: "Delete BRWAV",
+      caption: "Exact consequences",
+      actions: [action],
+      resources: [
+        {
+          id: "sample",
+          resource: { badge: "BRWAV", name: `BRWAV #${waveIndex} in WAR_${archiveId}` },
+          outcomes: { [actionId]: { text: "Sample will be deleted", status: "deleted" } },
+        },
+        ...references.map((reference, index) => ({
+          id: `reference-${index}`,
+          resource: {
+            badge: reference.kind === "bank-zone" ? "BANK" : "RWSD",
+            name: reference.name,
+          },
+          outcomes: {
+            [actionId]: references.length
+              ? { text: "Sample reference will be reassigned", status: "modified" }
+              : { text: "Reference remains unchanged", status: "retained" },
+          },
+        })),
+      ],
+    });
+    if (choice?.action !== actionId) return false;
+    const replacementWaveIndex = references.length ? Number(choice.selection) : null;
+    const result = await window.pysar.call(
+      "delete_wave_archive_sample", archiveId, waveIndex, replacementWaveIndex,
+    ).catch((error) => ({ ok: false, error: String(error) }));
+    if (!result?.ok) {
+      setOpenError(result?.error || "Could not delete BRWAV");
+      return false;
+    }
+    stop();
+    if (result.dirty) setDirty(true);
+    if (result.data) {
+      handleDataRefresh(result.data);
+      selectArchiveWave(result.data, archiveId, result.wave);
+    }
+    return true;
   }
 
   async function replaceWaveSound(soundId, path, encoding = null) {
@@ -3159,21 +3344,22 @@ function App() {
       }
       return;
     }
-    if (selection.sourceFormat === "WAV") {
-      const archiveItem = (window.PYSAR_DATA.waveArchives || []).find(
-        (item) => Number(item.id) === Number(archiveId),
-      );
-      setReplaceWaveTarget({
-        kind: "archive",
-        archiveId: Number(archiveId),
-        waveIndex: Number(waveIndex),
-        archiveName: archiveItem?.name,
-        path: selection.path,
-      });
-      return;
-    }
-    // A raw BRWAV already carries its target codec, so import it unchanged.
-    replaceWaveArchiveSample(archiveId, waveIndex, selection.path);
+    const archiveItem = (window.PYSAR_DATA.waveArchives || []).find(
+      (item) => Number(item.id) === Number(archiveId),
+    );
+    setReplaceWaveTarget({
+      kind: "archive",
+      operation: "replace",
+      archiveId: Number(archiveId),
+      waveIndex: Number(waveIndex),
+      archiveName: archiveItem?.name,
+      path: selection.path,
+      sourceFormat: selection.sourceFormat,
+      encoding: selection.encoding,
+      looped: selection.looped,
+      loopStart: selection.loopStart,
+      samples: selection.samples,
+    });
   }
 
   async function updateGroupProperty(groupId, patch) {
@@ -3214,6 +3400,80 @@ function App() {
     const name = requested.trim();
     if (!name || name === player.name) return false;
     return updatePlayerProperty(player.id, { name });
+  }
+
+  async function deletePlayer(player) {
+    if (!window.pysar || player?.id == null || player.protected) return false;
+    const impact = await window.pysar.call("get_player_delete_impact", player.id)
+      .catch((error) => ({ ok: false, error: String(error) }));
+    if (!impact?.ok) {
+      setOpenError(impact?.error || "Could not inspect player references");
+      return false;
+    }
+    const references = impact.references || [];
+    const replacements = impact.replacements || [];
+    if (references.length && !replacements.length) {
+      await window.pysarAlert(
+        "This is the only player and sounds still reference it. Create another player before deleting it.",
+        { title: "Player cannot be deleted" },
+      );
+      return false;
+    }
+    const action = references.length ? {
+      id: "reassign",
+      label: "Reassign and delete",
+      description: "Move every sound reference to the selected replacement player.",
+      confirmLabel: "Reassign and delete",
+      tone: "danger",
+      selection: {
+        label: "Replacement player",
+        options: replacements.map((item) => ({
+          value: item.id,
+          label: `${item.name} [${item.id}]`,
+        })),
+      },
+    } : {
+      id: "delete",
+      label: "Delete player",
+      description: "No sounds reference this player.",
+      confirmLabel: "Delete player",
+      tone: "danger",
+    };
+    const actionId = action.id;
+    const choice = await window.pysarConsequence(`Delete ${player.name || `player #${player.id}`}?`, {
+      title: "Delete player",
+      caption: "Exact consequences",
+      actions: [action],
+      resources: [
+        {
+          id: "player",
+          resource: { badge: "PLAYER", name: `${player.name} [${player.id}]` },
+          outcomes: { [actionId]: { text: "Player entry will be deleted", status: "deleted" } },
+        },
+        ...references.map((sound) => ({
+          id: `sound-${sound.id}`,
+          resource: { badge: sound.type || "SOUND", name: `${sound.name} [${sound.id}]` },
+          outcomes: { [actionId]: { text: "Player reference will be reassigned", status: "modified" } },
+        })),
+      ],
+    });
+    if (choice?.action !== actionId) return false;
+    const replacementPlayerId = references.length ? Number(choice.selection) : null;
+    const result = await window.pysar.call("delete_player", player.id, replacementPlayerId)
+      .catch((error) => ({ ok: false, error: String(error) }));
+    if (!result?.ok) {
+      setOpenError(result?.error || "Could not delete player");
+      return false;
+    }
+    if (result.dirty) setDirty(true);
+    if (result.data) {
+      const oldIndex = (D.players || []).findIndex((item) => Number(item.id) === Number(player.id));
+      handleDataRefresh(result.data);
+      const players = result.data.players || [];
+      const next = players[Math.min(Math.max(0, oldIndex), players.length - 1)] || null;
+      setSelectedItem(next ? { kind: "player", id: next.id, name: next.name, item: next } : null);
+    }
+    return true;
   }
 
   async function runBankMutation(operation) {
@@ -3362,31 +3622,76 @@ function App() {
   async function deleteBank(bank) {
     if (!window.pysar || bank?.id == null) return false;
     return runBankMutation(async () => {
-      const confirmed = await window.pysarConfirm(`Delete ${bank.name || `bank #${bank.id}`}?`, {
-        title: "Delete bank",
-        confirmLabel: "Delete",
-        danger: true,
-      });
-      if (!confirmed) return false;
-
-      let result = await window.pysar.call("delete_bank", bank.id, null)
+      const impact = await window.pysar.call("get_bank_delete_impact", bank.id)
         .catch((error) => ({ ok: false, error: String(error) }));
-      if (result?.requiresReplacement) {
-        const count = (result.references || []).length;
-        const replacementConfirmed = await window.pysarConfirm(
-          `${count} sequence sound${count === 1 ? "" : "s"} use ${bank.name}. ` +
-          `Delete it and reassign ${count === 1 ? "it" : "them"} to ${result.replacementName}?`,
-          {
-            title: "Reassign sequences and delete",
-            confirmLabel: "Reassign and delete",
-            danger: true,
-          },
-        );
-        if (!replacementConfirmed) return false;
-        result = await window.pysar.call(
-          "delete_bank", bank.id, result.suggestedReplacement,
-        ).catch((error) => ({ ok: false, error: String(error) }));
+      if (!impact?.ok) {
+        setOpenError(impact?.error || "Could not inspect bank references");
+        return false;
       }
+      const references = impact.references || [];
+      const replacements = impact.replacements || [];
+      if (references.length && !replacements.length) {
+        await window.pysarAlert(
+          "This is the only bank and sequence sounds still reference it. Create another bank before deleting it.",
+          { title: "Bank cannot be deleted" },
+        );
+        return false;
+      }
+      const action = references.length ? {
+        id: "reassign",
+        label: "Reassign and delete",
+        description: "Move every sequence reference to the selected replacement bank.",
+        confirmLabel: "Reassign and delete",
+        tone: "danger",
+        selection: {
+          label: "Replacement bank",
+          options: replacements.map((item) => ({
+            value: item.id,
+            label: `${item.name} [${item.id}]${item.sharesFile ? " · shared data" : ""}`,
+          })),
+        },
+      } : {
+        id: "delete",
+        label: "Delete bank",
+        description: "No sequence sounds reference this bank.",
+        confirmLabel: "Delete bank",
+        tone: "danger",
+      };
+      const actionId = action.id;
+      const backing = impact.backingFile || {};
+      const choice = await window.pysarConsequence(
+        `Delete ${bank.name || `bank #${bank.id}`}?`,
+        {
+          title: "Delete bank",
+          caption: "Exact consequences",
+          actions: [action],
+          resources: [
+            {
+              id: "bank",
+              resource: { badge: "BANK", name: `${bank.name} [${bank.id}]` },
+              outcomes: { [actionId]: { text: "Bank entry will be deleted", status: "deleted" } },
+            },
+            ...references.map((sound) => ({
+              id: `sound-${sound.id}`,
+              resource: { badge: "SEQ", name: `${sound.name} [${sound.id}]` },
+              outcomes: { [actionId]: { text: "Bank reference will be reassigned", status: "modified" } },
+            })),
+            {
+              id: "backing-file",
+              resource: { badge: "RBNK", name: backing.name || `Logical file #${backing.id}` },
+              outcomes: {
+                [actionId]: backing.willDelete
+                  ? { text: "Orphaned RBNK/RWAR data will be deleted", status: "deleted" }
+                  : { text: "Shared RBNK/RWAR data will be retained", status: "retained" },
+              },
+            },
+          ],
+        },
+      );
+      if (choice?.action !== actionId) return false;
+      const replacementBankId = references.length ? Number(choice.selection) : null;
+      const result = await window.pysar.call("delete_bank", bank.id, replacementBankId)
+        .catch((error) => ({ ok: false, error: String(error) }));
       if (!result?.ok) {
         setOpenError(result?.error || "Could not delete bank");
         return false;
@@ -3441,25 +3746,92 @@ function App() {
   }
 
   async function deleteGroup(groupId, groupName) {
-    if (!window.pysar || groupId == null) return;
+    if (!window.pysar || groupId == null) return false;
     const name = groupName || `group #${groupId}`;
-    if (!await window.pysarConfirm(`Delete ${name}?`, {
+    const impact = await window.pysar.call("get_group_delete_impact", groupId)
+      .catch((error) => ({ ok: false, error: String(error) }));
+    if (!impact?.ok) {
+      setOpenError(impact?.error || "Could not inspect group dependencies");
+      return false;
+    }
+    const files = impact.files || [];
+    const banks = impact.banks || [];
+    const sounds = impact.sounds || [];
+    const replacements = impact.replacements || [];
+    if (files.length && !replacements.length) {
+      await window.pysarAlert(
+        "This is the only group and it is the final load location of archive files. Create another group before deleting it.",
+        { title: "Group cannot be deleted" },
+      );
+      return false;
+    }
+    const action = files.length ? {
+      id: "move",
+      label: "Move files and delete",
+      description: "Move every file that would lose its final load location to the selected group.",
+      confirmLabel: "Move files and delete",
+      tone: "danger",
+      selection: {
+        label: "Replacement group",
+        options: replacements.map((item) => ({
+          value: item.id,
+          label: `${item.name} [${item.id}]`,
+        })),
+      },
+    } : {
+      id: "delete",
+      label: "Delete group",
+      description: "Every contained file already has another load-group location.",
+      confirmLabel: "Delete group",
+      tone: "danger",
+    };
+    const actionId = action.id;
+    const choice = await window.pysarConsequence(`Delete ${name}?`, {
       title: "Delete group",
-      confirmLabel: "Delete",
-      danger: true,
-    })) return;
-    const result = await window.pysar.call("delete_group", groupId).catch((error) => ({ ok: false, error: String(error) }));
+      caption: "Exact consequences",
+      actions: [action],
+      resources: [
+        {
+          id: "group",
+          resource: { badge: "GROUP", name: `${name} [${groupId}]` },
+          outcomes: { [actionId]: { text: "Group entry will be deleted", status: "deleted" } },
+        },
+        ...files.map((file) => ({
+          id: `file-${file.fileIndex}`,
+          resource: { badge: file.kind || "FILE", name: `${file.name} [FILE ${file.fileIndex}]` },
+          outcomes: { [actionId]: { text: "Final load location will be moved", status: "modified" } },
+        })),
+        ...banks.map((bank) => ({
+          id: `bank-${bank.id}`,
+          resource: { badge: "BANK", name: `${bank.name} [${bank.id}]` },
+          outcomes: { [actionId]: { text: "Retained; backing file remains loadable", status: "retained" } },
+        })),
+        ...sounds.map((sound) => ({
+          id: `sound-${sound.id}`,
+          resource: { badge: sound.type || "SOUND", name: `${sound.name} [${sound.id}]` },
+          outcomes: { [actionId]: { text: "Retained; backing file remains loadable", status: "retained" } },
+        })),
+      ],
+    });
+    if (choice?.action !== actionId) return false;
+    const replacementGroupId = files.length ? Number(choice.selection) : null;
+    const result = await window.pysar.call("delete_group", groupId, replacementGroupId)
+      .catch((error) => ({ ok: false, error: String(error) }));
     if (!result?.ok) {
       setOpenError(result?.error || "Delete failed");
-      return;
+      return false;
     }
     if (result.dirty) setDirty(true);
     if (result.data) {
       handleDataRefresh(result.data);
       const groups = result.data.groups || [];
-      const next = groups[Math.min(Number(groupId), groups.length - 1)] || null;
+      const replacement = result.replacementGroupId == null
+        ? null
+        : groups.find((group) => Number(group.id) === Number(result.replacementGroupId));
+      const next = replacement || groups[Math.min(Number(groupId), groups.length - 1)] || null;
       setSelectedItem(next ? { kind: "group", id: next.id, name: next.name, item: next } : null);
     }
+    return true;
   }
 
   async function deleteSound(sound) {
@@ -3661,8 +4033,8 @@ function App() {
     };
     if (tab.view === "all") content = <SoundsScreen filter={soundFilter} onFilterChange={changeSoundFilter} query={searchQuery} onClearSearch={() => setSearchQuery("")} onOpen={selectOnly} onActivate={openSound} onWarm={warmSoundPreview} onVisibleSoundsChange={rememberVisibleSounds} openId={selectedItem?.kind === "sound" ? selectedItem.id : null} density={tw.density} onPlay={play} playingId={playingId && isPlaying ? playingId : null} {...soundTableActions} />;
     else if (tab.view === "banks") content = <BanksTab query={searchQuery} onSelect={selectOrgItem} onActivate={openItem} onReplace={replaceBank} onExport={exportBank} onRename={renameBank} onDelete={deleteBank} openId={selectedItem?.kind === "bank" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
-    else if (tab.view === "groups") content = <GroupsTab query={searchQuery} onOpen={selectOrgItem} onNavigate={navigateToReferrer} openId={selectedItem?.kind === "group" ? selectedItem.id : null} safeMode={safeMode} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
-    else if (tab.view === "players") content = <PlayersTab query={searchQuery} onOpen={selectOrgItem} onRename={renamePlayer} onClear={() => setSelectedItem(null)} openId={selectedItem?.kind === "player" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
+    else if (tab.view === "groups") content = <GroupsTab query={searchQuery} onOpen={selectOrgItem} onNavigate={navigateToReferrer} onDelete={deleteGroup} openId={selectedItem?.kind === "group" ? selectedItem.id : null} safeMode={safeMode} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
+    else if (tab.view === "players") content = <PlayersTab query={searchQuery} onOpen={selectOrgItem} onRename={renamePlayer} onDelete={deletePlayer} onClear={() => setSelectedItem(null)} openId={selectedItem?.kind === "player" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
     else if (tab.view === "archives") content = <ArchivesTab query={searchQuery} onOpen={selectOrgItem} onActivate={openItem} onNavigate={navigateToReferrer} onClear={() => setSelectedItem(null)} openId={selectedItem?.kind === "archive" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
     else if (tab.view === "files") content = <FilesTab query={searchQuery} onOpen={selectFile} onNavigate={navigateToReferrer} openId={selectedItem?.kind === "file" ? selectedItem.id : null} openFileIndex={selectedItem?.kind === "file" ? (selectedItem.item?.fileIndex ?? null) : null} />;
   } else if (tab.kind === "sound") {
@@ -3744,8 +4116,10 @@ function App() {
         onNavigate={navigateToReferrer}
         selectedWaveIndex={focusWave}
         onPlayWave={playWave}
+        onImportWave={requestWaveArchiveImport}
         onExportWave={exportWaveArchiveSample}
         onReplaceWave={requestWaveArchiveReplacement}
+        onDeleteWave={deleteWaveArchiveSample}
         refreshRevision={dataRevision}
         onSelectWave={(it) => {
           setSelectedItem(it);
@@ -4005,11 +4379,14 @@ function App() {
             onUpdateGroup={updateGroupProperty}
             onUpdatePlayer={updatePlayerProperty}
             onRenamePlayer={renamePlayer}
+            onDeletePlayer={deletePlayer}
             onDeleteGroup={deleteGroup}
             onReplaceSound={requestSoundReplacement}
             onExportSound={exportSound}
             onReplaceWave={requestWaveArchiveReplacement}
             onExportWave={exportWaveArchiveSample}
+            onDeleteWave={deleteWaveArchiveSample}
+            onUpdateWave={updateWaveArchiveSample}
           />
         )}
       </div>
@@ -4061,11 +4438,22 @@ function App() {
         <ChooseRwavEncodingDialog
           target={replaceWaveTarget}
           onClose={() => setReplaceWaveTarget(null)}
-          onReplace={(encoding) => {
+          onReplace={(encoding, looped, loopStart) => {
             const target = replaceWaveTarget;
             setReplaceWaveTarget(null);
             if (target.kind === "sound") replaceWaveSound(target.soundId, target.path, encoding);
-            else replaceWaveArchiveSample(target.archiveId, target.waveIndex, target.path, encoding);
+            else if (target.operation === "add") {
+              addWaveArchiveSample(target.archiveId, target.path, encoding, looped, loopStart);
+            } else {
+              replaceWaveArchiveSample(
+                target.archiveId,
+                target.waveIndex,
+                target.path,
+                encoding,
+                looped,
+                loopStart,
+              );
+            }
           }}
         />
       )}

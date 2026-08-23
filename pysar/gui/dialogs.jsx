@@ -1320,36 +1320,69 @@ function ReplaceSoundDialog({ soundId, onClose, onDirtyChange, onDataRefresh, on
 }
 
 function ChooseRwavEncodingDialog({ target, onClose, onReplace }) {
-  const [codec, setCodec] = useStateD("");
+  const rawBrwav = target?.sourceFormat === "BRWAV";
+  const [codec, setCodec] = useStateD(rawBrwav ? (target?.encoding || "ADPCM") : "");
+  const [looped, setLooped] = useStateD(!!target?.looped);
+  const [loopStart, setLoopStart] = useStateD(Number(target?.loopStart || 0));
   const filename = String(target?.path || "").split(/[\\/]/).pop() || "selected WAV";
   const isWaveSound = target?.kind === "sound";
+  const isAdd = target?.operation === "add";
+  const supportsLoop = !isWaveSound;
+  const sampleCount = Math.max(0, Number(target?.samples || 0));
+  const loopValid = !looped || (sampleCount > 0 && loopStart >= 0 && loopStart < sampleCount);
   const targetName = isWaveSound
     ? (target?.soundName || "this WAVE sound")
     : (target?.archiveName || `WAR_${Number(target?.archiveId || 0).toString().padStart(4, "0")}`);
 
   return (
-    <ModalOverlay title="Encode WAV as RWAV" onClose={onClose} width={480}>
+    <ModalOverlay title={isAdd ? "Add BRWAV" : "Replace BRWAV"} onClose={onClose} width={480}>
       <div className="dialog-form">
         <div className="dialog-hint">
-          <strong>{filename}</strong> will replace {isWaveSound
+          <strong>{filename}</strong> will {isAdd ? `be added to ${targetName}` : `replace ${isWaveSound
             ? `the playable sample in ${targetName}`
-            : `sample #${target?.waveIndex} in ${targetName}`}.
+            : `sample #${target?.waveIndex} in ${targetName}`}`}.
         </div>
         <div className="dialog-field">
           <label>RWAV encoding</label>
-          <select value={codec} onChange={(event) => setCodec(event.target.value)} autoFocus>
+          <select value={codec} disabled={rawBrwav} onChange={(event) => setCodec(event.target.value)} autoFocus={!rawBrwav}>
             <option value="" disabled>Choose an encoding…</option>
             <option value="ADPCM">ADPCM — compact Nintendo ADPCM</option>
             <option value="PCM16">PCM16 — uncompressed 16-bit</option>
             <option value="PCM8">PCM8 — uncompressed 8-bit</option>
           </select>
         </div>
+        {supportsLoop && (
+          <>
+            <div className="dialog-field dialog-field-inline">
+              <label>Loop sample</label>
+              <input type="checkbox" checked={looped} onChange={(event) => setLooped(event.target.checked)} />
+            </div>
+            <div className="dialog-field">
+              <label>Loop start sample</label>
+              <input
+                className="mono"
+                type="number"
+                min="0"
+                max={Math.max(0, sampleCount - 1)}
+                value={loopStart}
+                disabled={!looped}
+                onChange={(event) => setLoopStart(Number(event.target.value))}
+              />
+            </div>
+          </>
+        )}
         <div className="dialog-hint">
-          A raw .brwav replacement keeps its own embedded encoding and skips this step.
+          {rawBrwav
+            ? "The source BRWAV keeps its encoding. Loop metadata may be adjusted before import."
+            : "WAV audio is encoded using the selected Nintendo RWAV codec."}
         </div>
         <div className="dialog-actions">
           <button className="tb-btn" onClick={onClose}>Cancel</button>
-          <button className="tb-btn primary" onClick={() => onReplace(codec)} disabled={!codec}>Replace</button>
+          <button
+            className="tb-btn primary"
+            onClick={() => onReplace(rawBrwav ? null : codec, looped, loopStart)}
+            disabled={(!rawBrwav && !codec) || !loopValid}
+          >{isAdd ? "Add" : "Replace"}</button>
         </div>
       </div>
     </ModalOverlay>

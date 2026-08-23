@@ -4,8 +4,10 @@ function ArchiveDetail({
   onSelectWave,
   onPlayWave,
   onNavigate,
+  onImportWave,
   onExportWave,
   onReplaceWave,
+  onDeleteWave,
   refreshRevision = 0,
 }) {
   const [details, setDetails] = useStateB(null);
@@ -100,6 +102,12 @@ function ArchiveDetail({
       </div>
       <div className="toolbar resource-toolbar war-wave-actions">
         <Button
+          primary
+          disabled={!onImportWave}
+          onClick={() => onImportWave?.(archive.id)}
+          title="Append a BRWAV or encoded WAV to this archive"
+        >Add</Button>
+        <Button
           disabled={!selectedWave || !onExportWave}
           onClick={() => selectedWave && onExportWave?.(archive.id, selectedWave.index)}
           title="Export the selected BRWAV as raw BRWAV or decoded WAV"
@@ -109,6 +117,14 @@ function ArchiveDetail({
           onClick={() => selectedWave && onReplaceWave?.(archive.id, selectedWave.index)}
           title="Replace the selected BRWAV from a BRWAV or WAV file"
         >Replace</Button>
+        <Button
+          className="danger"
+          disabled={!selectedWave || !onDeleteWave || !!selectedWave?.protected}
+          onClick={() => selectedWave && onDeleteWave?.(archive.id, selectedWave.index)}
+          title={selectedWave?.protected
+            ? "Safe Mode protects this original sample"
+            : "Delete the selected BRWAV and repair its references"}
+        >Delete</Button>
         <span className="grow"></span>
         <span className="war-wave-actions-status mono">
           {selectedWave ? `Selected BRWAV #${selectedWave.index}` : "Select a BRWAV to export or replace"}

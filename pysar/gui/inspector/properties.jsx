@@ -1,4 +1,4 @@
-function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDeleteSound, onRenameBank, onReplaceBank, onExportBank, onDeleteBank, onUpdateGroup, onUpdatePlayer, onRenamePlayer, onDeleteGroup, onReplaceSound, onExportSound, onReplaceWave, onExportWave }) {
+function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDeleteSound, onRenameBank, onReplaceBank, onExportBank, onDeleteBank, onUpdateGroup, onUpdatePlayer, onRenamePlayer, onDeletePlayer, onDeleteGroup, onReplaceSound, onExportSound, onReplaceWave, onExportWave, onDeleteWave, onUpdateWave }) {
   const D = window.PYSAR_DATA;
   // SOUND properties
   if (item.kind === "sound") {
@@ -120,6 +120,12 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDelet
               title={p.protected ? "Safe Mode protects this original player" : "Rename player"}
               onClick={() => onRenamePlayer?.(p)}
             >Rename</button>
+            <button
+              className="tb-btn danger"
+              disabled={!!p.protected}
+              title={p.protected ? "Safe Mode protects this original player" : "Delete player"}
+              onClick={() => onDeletePlayer?.(p)}
+            >Delete</button>
           </div>
         </CollapsibleSection>
       </>
@@ -220,9 +226,30 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDelet
           <Field label="Duration"><ReadOnly value={durationStr} /></Field>
         </CollapsibleSection>
         <CollapsibleSection title="Loop">
-          <Field label="Looped"><ReadOnly value={w.looped == null ? "-" : (w.looped ? "yes" : "no")} /></Field>
+          <Field label="Looped">
+            <input
+              type="checkbox"
+              checked={!!w.looped}
+              disabled={!!w.protected}
+              onChange={(event) => onUpdateWave?.(
+                w.archiveId,
+                w.index ?? w.waveIndex,
+                { looped: event.target.checked, loopStart: Number(w.loopStart || 0) },
+              )}
+            />
+          </Field>
           <Field label="Loop start">
-            <ReadOnly value={w.loopStart != null ? w.loopStart.toLocaleString() : "-"} />
+            <NumberInput
+              value={w.loopStart ?? 0}
+              min={0}
+              max={Math.max(0, Number(w.samples || 1) - 1)}
+              disabled={!!w.protected || !w.looped}
+              onChange={(value) => onUpdateWave?.(
+                w.archiveId,
+                w.index ?? w.waveIndex,
+                { looped: true, loopStart: value },
+              )}
+            />
           </Field>
         </CollapsibleSection>
         <CollapsibleSection title="Storage" defaultOpen={false}>
@@ -243,6 +270,13 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDelet
               disabled={w.archiveId == null || (w.index ?? w.waveIndex) == null}
               onClick={() => onExportWave?.(w.archiveId, w.index ?? w.waveIndex)}
             >Export</button>
+            <button
+              className="tb-btn danger"
+              style={{ flex: 1 }}
+              disabled={!!w.protected || w.archiveId == null || (w.index ?? w.waveIndex) == null}
+              title={w.protected ? "Safe Mode protects this original sample" : "Delete sample"}
+              onClick={() => onDeleteWave?.(w.archiveId, w.index ?? w.waveIndex)}
+            >Delete</button>
           </div>
         </CollapsibleSection>
       </>

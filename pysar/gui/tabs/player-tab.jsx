@@ -1,4 +1,4 @@
-function PlayersTab({ onOpen, onRename, onClear, openId, query, onDataRefresh, onDirty, onError }) {
+function PlayersTab({ onOpen, onRename, onDelete, onClear, openId, query, onDataRefresh, onDirty, onError }) {
   const D = window.PYSAR_DATA;
   const rows = filterByQuery(D.players, query);
   const active = D.players.find((player) => player.id === openId) || null;
@@ -48,47 +48,6 @@ function PlayersTab({ onOpen, onRename, onClear, openId, query, onDataRefresh, o
     await call("replace_player_dialog", [active.id]);
   }
 
-  async function deletePlayer() {
-    if (!active) return;
-    if (!await window.pysarConfirm(`Delete ${active.name}?`, {
-      title: "Delete player",
-      confirmLabel: "Delete",
-      danger: true,
-    })) return;
-    let result = await window.pysar.call("delete_player", active.id, null)
-      .catch((error) => ({ ok: false, error: String(error) }));
-    if (result?.requiresReplacement) {
-      const soundCount = (result.references || []).length;
-      const confirmed = await window.pysarConfirm(
-        `${soundCount} sound${soundCount === 1 ? "" : "s"} use ${active.name}. ` +
-        `Delete it and reassign them to ${result.replacementName}?`,
-        {
-          title: "Reassign sounds and delete",
-          confirmLabel: "Reassign and delete",
-          danger: true,
-        },
-      );
-      if (!confirmed) return;
-      result = await window.pysar.call("delete_player", active.id, result.suggestedReplacement)
-        .catch((error) => ({ ok: false, error: String(error) }));
-    }
-    if (!result?.ok) {
-      const message = result?.error || "Could not delete player";
-      if (onError) onError(message);
-      else window.pysarAlert(message, { title: "Could not delete player" });
-      return;
-    }
-    if (result.dirty) onDirty?.(true);
-    if (result.data) {
-      onDataRefresh?.(result.data);
-      const nextPlayers = result.data.players || [];
-      const oldIndex = D.players.findIndex((player) => player.id === active.id);
-      const next = nextPlayers[Math.min(Math.max(0, oldIndex), nextPlayers.length - 1)] || null;
-      if (next) onOpen?.({ kind: "player", id: next.id, name: next.name, item: next });
-      else onClear?.();
-    }
-  }
-
   return (
     <>
       <div className="toolbar">
@@ -104,7 +63,7 @@ function PlayersTab({ onOpen, onRename, onClear, openId, query, onDataRefresh, o
         <Button
           disabled={!active || !!active?.protected}
           className="danger"
-          onClick={deletePlayer}
+          onClick={() => active && onDelete?.(active)}
           title={active?.protected ? "Safe Mode protects this original player" : undefined}
         >Delete</Button>
         <span className="grow"></span>
