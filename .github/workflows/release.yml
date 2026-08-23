@@ -79,8 +79,12 @@ jobs:
         run: |
           $executable = "Pysar-${{ env.BUILD_LABEL }}-Windows-x64.exe"
           $archive = "Pysar-${{ env.BUILD_LABEL }}-Windows-x64.zip"
-          Move-Item "dist/Pysar.exe" $executable
-          Compress-Archive -Path $executable -DestinationPath $archive
+          $bundle = "dist/Pysar-Windows-x64"
+          New-Item -ItemType Directory -Path $bundle | Out-Null
+          Move-Item "dist/Pysar.exe" "$bundle/$executable"
+          Copy-Item "LICENSE" "$bundle/LICENSE"
+          Copy-Item "third_party_licenses" "$bundle/third_party_licenses" -Recurse
+          Compress-Archive -Path "$bundle/*" -DestinationPath $archive
 
       - name: Upload Windows archive
         uses: actions/upload-artifact@v7
@@ -151,7 +155,12 @@ jobs:
         run: test -x dist/Pysar
 
       - name: Package Linux bundle
-        run: tar -C dist -czf "Pysar-${{ env.BUILD_LABEL }}-Linux-x64.tar.gz" Pysar
+        run: |
+          mkdir -p dist/Pysar-Linux-x64
+          mv dist/Pysar dist/Pysar-Linux-x64/Pysar
+          cp LICENSE dist/Pysar-Linux-x64/LICENSE
+          cp -R third_party_licenses dist/Pysar-Linux-x64/third_party_licenses
+          tar -czf "Pysar-${{ env.BUILD_LABEL }}-Linux-x64.tar.gz" -C dist/Pysar-Linux-x64 .
 
       - name: Upload Linux bundle
         uses: actions/upload-artifact@v7
