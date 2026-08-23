@@ -1327,7 +1327,7 @@ function ChooseRwavEncodingDialog({ target, onClose, onReplace }) {
   const filename = String(target?.path || "").split(/[\\/]/).pop() || "selected WAV";
   const isWaveSound = target?.kind === "sound";
   const isAdd = target?.operation === "add";
-  const supportsLoop = !isWaveSound;
+  const supportsLoop = true;
   const sampleCount = Math.max(0, Number(target?.samples || 0));
   const loopValid = !looped || (sampleCount > 0 && loopStart >= 0 && loopStart < sampleCount);
   const targetName = isWaveSound

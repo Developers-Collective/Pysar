@@ -294,6 +294,10 @@ class Brwar(EditorBase):
         self.mark_dirty(DirtyFlags.ALL)
         return editor
 
+    def __delitem__(self, index: int) -> None:
+        """Remove one BRWAV using normal container syntax."""
+        self.remove(index)
+
     def clear(self) -> None:
         """Remove all entries from the archive."""
         self._data.entries.clear()

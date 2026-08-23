@@ -1,4 +1,5 @@
 const { useState: useStateA, useEffect: useEffectA, useMemo: useMemoA, useCallback: useCallbackA } = React;
+const ERROR_TOAST_DURATION_MS = 10000;
 
 const ACCENT_PALETTE = {
   royal:      { accent: "#5a3fa8", hover: "#7558c9" },
@@ -156,8 +157,11 @@ function App() {
   const [archive, setArchive] = useStateA(tw.showWelcome ? null : D.archive);
   const [appMeta, setAppMeta] = useStateA(window.PYSAR_APP);
   const [openErrorToast, setOpenErrorToast] = useStateA(null);
+  const [errorToastHovered, setErrorToastHovered] = useStateA(false);
+  const errorToastTimingRef = React.useRef({ id: null, remainingMs: ERROR_TOAST_DURATION_MS, startedAt: 0 });
   const openError = openErrorToast?.message || null;
   const setOpenError = useCallbackA((value) => {
+    setErrorToastHovered(false);
     setOpenErrorToast((current) => {
       const next = typeof value === "function" ? value(current?.message || null) : value;
       if (next == null || next === "") return null;
@@ -294,15 +298,38 @@ function App() {
   const searchInputRef = React.useRef(null);
 
   useEffectA(() => {
-    // Workspace errors use a short-lived toast. Keep errors on the welcome
-    // screen visible so a failed archive open remains readable.
-    if (!archive || !openErrorToast) return undefined;
+    // Keep errors on the welcome screen visible. Workspace errors dismiss
+    // after a readable interval, preserving the remaining time while the
+    // pointer is over the toast so its text can be selected and copied.
+    const timing = errorToastTimingRef.current;
+    if (!archive || !openErrorToast) {
+      timing.id = null;
+      timing.remainingMs = ERROR_TOAST_DURATION_MS;
+      timing.startedAt = 0;
+      return undefined;
+    }
     const shownId = openErrorToast.id;
+    if (timing.id !== shownId) {
+      timing.id = shownId;
+      timing.remainingMs = ERROR_TOAST_DURATION_MS;
+      timing.startedAt = 0;
+    }
+    if (errorToastHovered) return undefined;
+
+    timing.startedAt = Date.now();
     const timeout = window.setTimeout(() => {
+      timing.remainingMs = 0;
+      timing.startedAt = 0;
       setOpenErrorToast((current) => current?.id === shownId ? null : current);
-    }, 1000);
-    return () => window.clearTimeout(timeout);
-  }, [archive, openErrorToast?.id]);
+    }, Math.max(0, timing.remainingMs));
+    return () => {
+      window.clearTimeout(timeout);
+      if (timing.id === shownId && timing.startedAt) {
+        timing.remainingMs = Math.max(0, timing.remainingMs - (Date.now() - timing.startedAt));
+        timing.startedAt = 0;
+      }
+    };
+  }, [archive, openErrorToast?.id, errorToastHovered]);
 
   // apply theme + accent
   useEffectA(() => {
@@ -3150,16 +3177,17 @@ function App() {
       if (selection?.error !== "Cancelled") setOpenError(selection?.error || "Could not choose a wave replacement");
       return;
     }
-    if (selection.sourceFormat === "WAV") {
-      setReplaceWaveTarget({
-        kind: "sound",
-        soundId: Number(soundId),
-        soundName: sound.name,
-        path: selection.path,
-      });
-      return;
-    }
-    replaceWaveSound(soundId, selection.path);
+    setReplaceWaveTarget({
+      kind: "sound",
+      soundId: Number(soundId),
+      soundName: sound.name,
+      path: selection.path,
+      sourceFormat: selection.sourceFormat,
+      encoding: selection.encoding,
+      looped: selection.looped,
+      loopStart: selection.loopStart,
+      samples: selection.samples,
+    });
   }
 
   function refreshSelectedWave(data, archiveId, wave) {
@@ -3533,9 +3561,16 @@ function App() {
     return true;
   }
 
-  async function replaceWaveSound(soundId, path, encoding = null) {
+  async function replaceWaveSound(soundId, path, encoding = null, looped = null, loopStart = 0) {
     if (!window.pysar || soundId == null || !path) return;
-    const result = await window.pysar.call("replace_wave_sound_from_path", soundId, path, encoding)
+    const result = await window.pysar.call(
+      "replace_wave_sound_from_path",
+      soundId,
+      path,
+      encoding,
+      looped,
+      loopStart,
+    )
       .catch((error) => ({ ok: false, error: String(error) }));
     if (!result?.ok) {
       if (result?.error !== "Cancelled") setOpenError(result?.error || "Wave replacement failed");
@@ -4058,27 +4093,68 @@ function App() {
       return;
     }
     const backing = impact.backingFile || {};
+    const cleanupResources = Array.isArray(impact.cleanupResources)
+      ? impact.cleanupResources
+      : [];
+    const cleanupAvailable = cleanupResources.some((item) => !item.protected);
+    const cleanupContainsBackingFile = cleanupResources.some(
+      (item) => item.resourceType === "file" && Number(item.fileIndex) === Number(backing.id),
+    );
+    const cleanupBadge = (item) => {
+      if (item.resourceType === "bank") return "BANK";
+      if (item.resourceType === "wave") return "BRWAV";
+      if (item.resourceType === "wsd-entry") return "RWSD";
+      return String(item.kind || item.resourceType || "FILE").split(" ")[0].toUpperCase();
+    };
+    const actions = [{
+      id: "delete",
+      label: "Delete sound only",
+      description: "Keep its backing sequence, wave, or stream data for reuse and later cleanup.",
+      confirmLabel: "Delete sound",
+      tone: "danger",
+    }];
+    if (cleanupAvailable) {
+      actions.push({
+        id: "cleanup",
+        label: "Delete and clean up",
+        description: "Also remove resources made unreachable by deleting this sound. Existing unrelated leftovers are retained.",
+        confirmLabel: "Delete and clean up",
+        tone: "danger",
+      });
+    }
     const choice = await window.pysarConsequence(
       `Delete ${sound.name || `sound #${sound.id}`} from the archive's sound list?`,
       {
         title: "Delete sound",
         caption: "Exact consequences",
-        actions: [{
-          id: "delete",
-          label: "Delete sound only",
-          description: "Keep its backing sequence, wave, or stream data for reuse and later cleanup.",
-          confirmLabel: "Delete sound",
-          tone: "danger",
-        }],
+        actions,
         resources: [
           {
             id: "sound",
             resource: { badge: sound.type || "SOUND", name: `${sound.name} [${sound.id}]` },
             outcomes: {
               delete: { text: "Sound entry will be deleted", status: "deleted" },
+              ...(cleanupAvailable ? {
+                cleanup: { text: "Sound entry will be deleted", status: "deleted" },
+              } : {}),
             },
           },
-          {
+          ...cleanupResources.map((item, index) => ({
+            id: `cleanup-${item.resourceType}-${item.fileIndex ?? item.fileId ?? ""}-${item.id}-${index}`,
+            resource: {
+              badge: cleanupBadge(item),
+              name: item.name,
+            },
+            outcomes: {
+              delete: { text: "Kept in the archive", status: "retained" },
+              ...(cleanupAvailable ? {
+                cleanup: item.protected
+                  ? { text: "Retained by Safe Mode", status: "retained" }
+                  : { text: "Will be deleted", status: "deleted" },
+              } : {}),
+            },
+          })),
+          ...(!cleanupContainsBackingFile ? [{
             id: "backing-file",
             resource: {
               badge: backing.kind || "FILE",
@@ -4089,13 +4165,20 @@ function App() {
             },
             outcomes: {
               delete: { text: "Backing data will be retained", status: "retained" },
+              ...(cleanupAvailable ? {
+                cleanup: { text: "Still referenced; will be retained", status: "retained" },
+              } : {}),
             },
-          },
+          }] : []),
         ],
       },
     );
-    if (choice?.action !== "delete") return;
-    const result = await window.pysar.call("delete_sound", sound.id)
+    if (!choice?.action || !["delete", "cleanup"].includes(choice.action)) return;
+    const result = await window.pysar.call(
+      "delete_sound",
+      sound.id,
+      choice.action === "cleanup",
+    )
       .catch((error) => ({ ok: false, error: String(error) }));
     if (!result?.ok) {
       setOpenError(result?.error || "Delete failed");
@@ -4519,7 +4602,13 @@ function App() {
       </div>
 
       {archive && openError && (
-        <div className="app-error-toast" role="alert" key={openErrorToast.id}>
+        <div
+          className="app-error-toast"
+          role="alert"
+          key={openErrorToast.id}
+          onMouseEnter={() => setErrorToastHovered(true)}
+          onMouseLeave={() => setErrorToastHovered(false)}
+        >
           <span>{openError}</span>
           <button onClick={() => setOpenError(null)} aria-label="Dismiss error"><span aria-hidden="true">×</span></button>
         </div>
@@ -4660,7 +4749,9 @@ function App() {
           onReplace={(encoding, looped, loopStart) => {
             const target = replaceWaveTarget;
             setReplaceWaveTarget(null);
-            if (target.kind === "sound") replaceWaveSound(target.soundId, target.path, encoding);
+            if (target.kind === "sound") {
+              replaceWaveSound(target.soundId, target.path, encoding, looped, loopStart);
+            }
             else if (target.operation === "add") {
               addWaveArchiveSample(target.archiveId, target.path, encoding, looped, loopStart);
             } else {

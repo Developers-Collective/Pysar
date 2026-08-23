@@ -575,13 +575,31 @@ class SequenceRenderer:
         player = self.make_sequence_player(context, settings)
         self.last_sequence_truncated = False
         seek_state = {"suppress": start_frame > 0}
+        tick_events = player.iter_event_ticks(
+            max_ticks=settings.max_ticks,
+            loop_count=settings.loop_count,
+            one_shot=settings.one_shot,
+            suppress_track_state=lambda: seek_state["suppress"],
+        )
+
+        # TIMEBASE is a sequence command, so a newly loaded player still
+        # reports the default value until its zero-time command burst runs.
+        # Prime that first tick before constructing the streaming clock.  The
+        # buffered renderer already renders all events first and therefore did
+        # not have this problem; without priming, streamed/dumped sequences
+        # with timebase 96 were played at half speed.
+        try:
+            first_tick = next(tick_events)
+        except StopIteration:
+            first_tick = None
+
+        def primed_ticks():
+            if first_tick is not None:
+                yield first_tick
+            yield from tick_events
+
         frame_events = self._iter_tick_frame_events(
-            player.iter_event_ticks(
-                max_ticks=settings.max_ticks,
-                loop_count=settings.loop_count,
-                one_shot=settings.one_shot,
-                suppress_track_state=lambda: seek_state["suppress"],
-            ),
+            primed_ticks(),
             player.timebase,
             settings.sample_rate,
             start_frame=start_frame,

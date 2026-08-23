@@ -4,6 +4,10 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDelet
   if (item.kind === "sound") {
     const s = item.item;
     const patch = (key, val) => { if (onUpdateSound) onUpdateSound(s.id, { [key]: val }); };
+    const compatibleArchiveIds = new Set(s.compatibleAudioFileIds || []);
+    const waveArchiveOptions = (D.waveArchives || []).filter((archive) => (
+      compatibleArchiveIds.has(archive.id) || archive.id === s.audioFileId
+    ));
     return (
       <>
         <CollapsibleSection title="Identity">
@@ -13,7 +17,12 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDelet
         </CollapsibleSection>
         <CollapsibleSection title="Routing">
           <Field label="Player"><RefSelect value={s.player} options={D.players || []} onChange={(v) => patch("player", v)} onNavigate={onNavigate} referenceKind="player" /></Field>
-          <Field label="Bank"><RefSelect value={s.bank} options={D.banks || []} empty="No bank" disabled onNavigate={onNavigate} referenceKind="bank" /></Field>
+          {s.type === "SEQ" && (
+            <Field label="Bank"><RefSelect value={s.bank} options={D.banks || []} empty="No bank" onChange={(v) => patch("bank", v)} onNavigate={onNavigate} referenceKind="bank" /></Field>
+          )}
+          {s.type === "WAVE" && (
+            <Field label="Wave archive"><RefSelect value={s.audioFileId} options={waveArchiveOptions} empty="No compatible archive" onChange={(v) => patch("waveArchive", v)} onNavigate={onNavigate} referenceKind="archive" /></Field>
+          )}
           <Field label="Group"><RefSelect value={s.group} options={D.groups || []} empty="No group" disabled onNavigate={onNavigate} referenceKind="group" /></Field>
         </CollapsibleSection>
         <CollapsibleSection title="Volume & Pan">
@@ -27,7 +36,9 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDelet
         <CollapsibleSection title="File" defaultOpen={false}>
           <Field label="File index"><ReadOnly value={s.file} /></Field>
           <Field label="Data file"><RefSelect value={s.dataFileId} options={D.files || []} disabled empty="No data file" onNavigate={onNavigate} referenceKind="file" /></Field>
-          <Field label="Audio file"><RefSelect value={s.audioFileId} options={D.waveArchives || []} disabled empty="No audio file" onNavigate={onNavigate} referenceKind="archive" /></Field>
+          {s.type !== "WAVE" && (
+            <Field label="Audio file"><RefSelect value={s.audioFileId} options={D.waveArchives || []} disabled empty="No audio file" onNavigate={onNavigate} referenceKind="archive" /></Field>
+          )}
           {s.type === "STRM" && (
             <>
               <Field label="External path"><ReadOnly value={s.externalPath || "-"} /></Field>

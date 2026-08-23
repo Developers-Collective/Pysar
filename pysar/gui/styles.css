@@ -130,6 +130,7 @@ input:focus, select:focus, textarea:focus, button:focus { outline: none; }
   background: var(--bg-base);
 }
 .app-error-toast {
+  --error-toast-duration: 10s;
   position: fixed;
   top: 76px;
   right: 16px;
@@ -156,8 +157,11 @@ input:focus, select:focus, textarea:focus, button:focus { outline: none; }
   height: 2px;
   background: var(--accent);
   transform-origin: left center;
-  animation: error-toast-countdown 1s linear forwards;
+  animation: error-toast-countdown var(--error-toast-duration) linear forwards;
   pointer-events: none;
+}
+.app-error-toast:hover::after {
+  animation-play-state: paused;
 }
 @keyframes error-toast-countdown {
   to { transform: scaleX(0); }
@@ -165,6 +169,10 @@ input:focus, select:focus, textarea:focus, button:focus { outline: none; }
 .app-error-toast > span {
   min-width: 0;
   overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
 }
 .app-error-toast button {
   flex: 0 0 auto;

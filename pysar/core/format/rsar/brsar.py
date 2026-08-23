@@ -2778,6 +2778,96 @@ class Brsar(EditorBase):
             break
         return deleted
 
+    @staticmethod
+    def _unused_resource_key(item: dict[str, Any]) -> tuple[object, ...]:
+        return (
+            item.get("resourceType"),
+            item.get("fileIndex"),
+            item.get("fileId"),
+            item.get("id"),
+        )
+
+    def delete_selected_unused_archive_resources(
+            self,
+            resources: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        requested = {
+            self._unused_resource_key(item)
+            for item in resources
+        }
+        available = {
+            self._unused_resource_key(item): item
+            for item in self.list_unused_archive_resources()
+            if not bool(item["protected"])
+        }
+        selected = [available[key] for key in requested if key in available]
+        deleted: list[dict[str, Any]] = []
+        deleted_keys: set[tuple[object, ...]] = set()
+
+        def record(item: dict[str, Any]) -> None:
+            key = self._unused_resource_key(item)
+            if key not in deleted_keys:
+                deleted.append(item)
+                deleted_keys.add(key)
+
+        banks = [item for item in selected if item["resourceType"] == "bank"]
+        for item in sorted(banks, key=lambda value: int(value["id"]), reverse=True):
+            bank_index = int(item["id"])
+            if not 0 <= bank_index < len(self._data.bank_entries):
+                continue
+            if any(
+                    sound.sound_type == SoundType.SEQ
+                    and isinstance(sound.sound_info, SeqSoundInfo)
+                    and int(sound.sound_info.bank_index) == bank_index
+                    for sound in self._data.sound_entries
+            ):
+                continue
+            self.delete_bank(bank_index)
+            record(item)
+
+        wsd_entries = [
+            item for item in selected if item["resourceType"] == "wsd-entry"
+        ]
+        grouped_entries: dict[int, list[dict[str, Any]]] = {}
+        for item in wsd_entries:
+            grouped_entries.setdefault(int(item["fileIndex"]), []).append(item)
+        for file_index, items in sorted(grouped_entries.items()):
+            removed = set(self.delete_wsd_entries(
+                file_index,
+                [int(item["id"]) for item in items],
+            ))
+            for item in items:
+                if int(item["id"]) in removed:
+                    record(item)
+
+        files = [item for item in selected if item["resourceType"] == "file"]
+        for item in files:
+            file_index = int(item["fileIndex"])
+            if not 0 <= file_index < len(self._data.file_entries):
+                continue
+            # delete_bank may already have discarded this file as its required
+            # cascade. It still counts as one of the selected consequences.
+            if not self._file_entry_has_payload(self._data.file_entries[file_index]):
+                record(item)
+            elif self.discard_orphan_file(file_index):
+                record(item)
+
+        waves = [item for item in selected if item["resourceType"] == "wave"]
+        grouped_waves: dict[int, list[dict[str, Any]]] = {}
+        for item in waves:
+            grouped_waves.setdefault(int(item["fileId"]), []).append(item)
+        for file_id, items in sorted(grouped_waves.items()):
+            for item in sorted(items, key=lambda value: int(value["id"]), reverse=True):
+                wave_index = int(item["id"])
+                embedded = self._data.embedded_files.get(file_id)
+                if embedded is None or embedded.magic != "RWAR":
+                    continue
+                if self.get_wave_archive_sample_references(file_id, wave_index):
+                    continue
+                self.delete_wave_archive_sample(file_id, wave_index, None)
+                record(item)
+        return deleted
+
     def _validate_bank_name(
             self,
             name: object,
@@ -3158,6 +3248,97 @@ class Brsar(EditorBase):
     # Sound modification
     #
 
+    def set_sequence_sound_bank(self, sound_index: int, bank_index: int) -> None:
+        """Route one sequence sound through another existing bank."""
+        sound_index = int(sound_index)
+        bank_index = int(bank_index)
+        if not 0 <= sound_index < len(self._data.sound_entries):
+            raise BrsarError(f"Invalid sound index {sound_index}")
+        if not 0 <= bank_index < len(self._data.bank_entries):
+            raise BrsarError(f"Invalid bank index {bank_index}")
+        entry = self._data.sound_entries[sound_index]
+        if entry.sound_type != SoundType.SEQ or not isinstance(entry.sound_info, SeqSoundInfo):
+            raise BrsarError("Only sequence sounds can reference a bank")
+        entry.sound_info.bank_index = bank_index
+        self.mark_dirty(DirtyFlags.DATA)
+
+    def compatible_wave_archive_ids(self, sound_index: int) -> list[int]:
+        """Return physical RWAR ids that have a compatible RWSD sound slot."""
+        from pysar.core.format.rwsd import Brwsd
+
+        sound_index = int(sound_index)
+        if not 0 <= sound_index < len(self._data.sound_entries):
+            return []
+        entry = self._data.sound_entries[sound_index]
+        if entry.sound_type != SoundType.WAVE or not isinstance(entry.sound_info, WaveSoundInfo):
+            return []
+
+        required_slot = int(entry.sound_info.wave_index)
+        compatible: set[int] = set()
+        entry_counts: dict[int, int] = {}
+        for group in self._data.group_entries:
+            for sub in group.group_table:
+                if sub.audio_file_id is None:
+                    continue
+                file_index = int(sub.group_index)
+                if file_index not in entry_counts:
+                    raw = self._resolve_file_raw(file_index)
+                    if raw is None or raw[:4] != b"RWSD":
+                        entry_counts[file_index] = -1
+                    else:
+                        try:
+                            entry_counts[file_index] = len(Brwsd.from_bytes(raw))
+                        except Exception:
+                            entry_counts[file_index] = -1
+                if required_slot < entry_counts[file_index]:
+                    embedded = self._data.embedded_files.get(int(sub.audio_file_id))
+                    if embedded is not None and embedded.magic == "RWAR":
+                        compatible.add(int(sub.audio_file_id))
+        return sorted(compatible)
+
+    def set_wave_sound_archive(self, sound_index: int, archive_file_id: int) -> int:
+        """Route a WAVE sound to an RWSD/RWAR pair containing its WSD slot.
+
+        WAVE sounds do not point directly at an RWAR.  Their FILE index points
+        at an RWSD and that logical file owns the companion RWAR.  Resolve the
+        selected physical RWAR back to a compatible logical RWSD instead of
+        writing an invalid direct reference.
+        """
+        from pysar.core.format.rwsd import Brwsd
+
+        sound_index = int(sound_index)
+        archive_file_id = int(archive_file_id)
+        if not 0 <= sound_index < len(self._data.sound_entries):
+            raise BrsarError(f"Invalid sound index {sound_index}")
+        embedded = self._data.embedded_files.get(archive_file_id)
+        if embedded is None or embedded.magic != "RWAR":
+            raise BrsarError(f"Embedded file {archive_file_id} is not an RWAR")
+
+        entry = self._data.sound_entries[sound_index]
+        if entry.sound_type != SoundType.WAVE or not isinstance(entry.sound_info, WaveSoundInfo):
+            raise BrsarError("Only WAVE sounds can reference a wave archive")
+
+        required_slot = int(entry.sound_info.wave_index)
+        candidates = []
+        for file_index in sorted(self._wave_archive_logical_files(archive_file_id)):
+            raw = self._resolve_file_raw(file_index)
+            if raw is None or raw[:4] != b"RWSD":
+                continue
+            try:
+                if required_slot < len(Brwsd.from_bytes(raw)):
+                    candidates.append(file_index)
+            except Exception:
+                continue
+        if not candidates:
+            raise BrsarError(
+                f"RWAR {archive_file_id} has no paired RWSD containing sound slot {required_slot}"
+            )
+
+        target = int(entry.file_index) if int(entry.file_index) in candidates else candidates[0]
+        entry.file_index = target
+        self.mark_dirty(DirtyFlags.DATA)
+        return target
+
     def create_brwsd(
             self,
             *,
@@ -3334,13 +3515,35 @@ class Brsar(EditorBase):
         file_index = entry.file_index
         wave_info = entry.sound_info
         removed_wsd_idx = wave_info.wave_index
+        shared_wsd_entry = any(
+            sound is not entry
+            and sound.sound_type == SoundType.WAVE
+            and int(sound.file_index) == int(file_index)
+            and isinstance(sound.sound_info, WaveSoundInfo)
+            and int(sound.sound_info.wave_index) == int(removed_wsd_idx)
+            for sound in self._data.sound_entries
+        )
 
-        # Remove the WSD entry from the BRWSD and write it back.
+        # Multiple SOUND rows may intentionally share one RWSD entry. Remove
+        # the child entry only when this is its final top-level owner.
         wsd_raw = self._resolve_file_raw(file_index)
-        if wsd_raw is not None:
+        removed_wsd_entry = False
+        if wsd_raw is not None and not shared_wsd_entry:
             brwsd = Brwsd.from_bytes(wsd_raw)
             if 0 <= removed_wsd_idx < len(brwsd):
+                self.require_safe_mutation(
+                    "deleting it", "wsd_entry", int(file_index), int(removed_wsd_idx),
+                )
+                if self._safe_mode and any(
+                    self.is_protected("wsd_entry", int(file_index), later)
+                    for later in range(int(removed_wsd_idx) + 1, len(brwsd))
+                ):
+                    raise BrsarError(
+                        "Safe Mode cannot delete this RWSD entry because doing so "
+                        "would reindex a later original entry"
+                    )
                 del brwsd[removed_wsd_idx]
+                removed_wsd_entry = True
 
                 # Shift wave indices of remaining WAVE sounds in same BRWSD.
                 for s in self._data.sound_entries:
@@ -3358,9 +3561,10 @@ class Brsar(EditorBase):
 
         # Remove the sound entry itself.
         del self._data.sound_entries[info_idx]
-        self.remap_child_provenance_after_delete(
-            "wsd_entry", (int(file_index),), int(removed_wsd_idx),
-        )
+        if removed_wsd_entry:
+            self.remap_child_provenance_after_delete(
+                "wsd_entry", (int(file_index),), int(removed_wsd_idx),
+            )
         self.remap_provenance_after_delete("sound", info_idx)
 
         self._rebuild_sound_trie()
@@ -3544,6 +3748,9 @@ class Brsar(EditorBase):
                 f'note_index={note_index} out of range, sound "{name}" uses {len(wsd_entry.notes)} sample(s)'
             )
         wav_idx = wsd_entry.notes[note_index].wave_index
+        self.require_safe_mutation(
+            "replacing it", "wave", int(entry.file_index), int(wav_idx),
+        )
 
         # Get BRWAR via audio resolution
         war_raw = self._resolve_audio_raw_for_sound(entry)
@@ -3633,7 +3840,15 @@ class Brsar(EditorBase):
                 f'wav_no={wav_no} out of range, sound "{name}" uses {len(wav_indices)} WAV(s)'
             )
 
-        brwar[wav_indices[wav_no]] = brwav
+        raw_wave_index = int(wav_indices[wav_no])
+        bank_index = int(seq_info.bank_index)
+        if not 0 <= bank_index < len(self._data.bank_entries):
+            raise BrsarError(f'Sequence sound "{name}" references invalid bank {bank_index}')
+        bank_file_index = int(self._data.bank_entries[bank_index].file_index)
+        self.require_safe_mutation(
+            "replacing it", "wave", bank_file_index, raw_wave_index,
+        )
+        brwar[raw_wave_index] = brwav
 
         # Write back
         self._update_audio_file_for_bank(seq_info.bank_index, brwar.to_bytes())

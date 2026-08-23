@@ -2941,19 +2941,26 @@ class PysarApi:
         if not programs:
             programs = sorted({int(program) for program in context.default_programs.values()}) or [0]
 
-        def wave_signature(rendered_events: list[dict]) -> frozenset[int]:
+        def wave_signature(
+            rendered_events: list[dict],
+            *,
+            program_override: int | None = None,
+            note_override: int | None = None,
+        ) -> frozenset[int]:
             waves: set[int] = set()
             for event in rendered_events:
                 if event.get("type") not in ("note_on", "note_change"):
                     continue
                 param = context.brbnk.get_inst_param(
-                    int(event.get("program", 0)),
-                    int(event.get("note", 60)),
+                    int(program_override if program_override is not None else event.get("program", 0)),
+                    int(note_override if note_override is not None else event.get("note", 60)),
                     int(event.get("velocity", 127)),
                 )
                 if param is not None and param.wave_data_location_type == WaveDataLocationType.INDEX:
                     waves.add(int(param.wave_index))
             return frozenset(waves)
+
+        default_signature = wave_signature(events)
 
         # Only random operations capable of changing program/key/velocity or
         # conditional flow can select another sample. Validate their actual
@@ -2997,12 +3004,56 @@ class PysarApi:
             if len(outcomes) <= 1:
                 continue
             true_sources.append(source)
-            for position, value in enumerate(outcomes.values(), start=1):
-                variations.append({
+            # The unmodified player is already exposed as "Default variation"
+            # in the UI.  Do not list the same rendered sample a second time.
+            seen_signatures = {default_signature} if default_signature else set()
+            choices: list[tuple[frozenset[int], dict[str, Any]]] = []
+            for signature, value in outcomes.items():
+                if not signature or signature in seen_signatures:
+                    continue
+                seen_signatures.add(signature)
+                choices.append((signature, {
                     "id": f"r{source['index']}:v{value}",
-                    "label": f"Variation {position}",
                     "randomOverrides": [[int(source["index"]), value]],
                     "randomSource": source,
+                }))
+
+            # Some Nintendo sequences combine a small random value with a
+            # persistent global variable before transposing a note.  A fresh
+            # preview player cannot observe every state in that cycle (for
+            # example a three-zone bank selected by a two-value randvar).
+            # Complete those choices from the actually used program's key
+            # zones.  Use each sample's original key so the deterministic
+            # preview is not spuriously pitched to a zone boundary.
+            if len(programs) == 1:
+                program = programs[0]
+                for probe_note in context.brbnk.get_variation_notes(program):
+                    param = context.brbnk.get_inst_param(program, probe_note, 127)
+                    if param is None or param.wave_data_location_type != WaveDataLocationType.INDEX:
+                        continue
+                    candidate_note = int(param.original_key)
+                    candidate_param = context.brbnk.get_inst_param(program, candidate_note, 127)
+                    if candidate_param is None or int(candidate_param.wave_index) != int(param.wave_index):
+                        candidate_note = int(probe_note)
+                    signature = wave_signature(
+                        events,
+                        program_override=program,
+                        note_override=candidate_note,
+                    )
+                    if not signature or signature in seen_signatures:
+                        continue
+                    seen_signatures.add(signature)
+                    choices.append((signature, {
+                        "id": f"r{source['index']}:n{candidate_note}",
+                        "note": candidate_note,
+                        "program": program,
+                        "randomSource": source,
+                    }))
+
+            for position, (_, choice) in enumerate(choices, start=2):
+                variations.append({
+                    **choice,
+                    "label": f"Variation {position}",
                 })
             break
 
@@ -3114,24 +3165,42 @@ class PysarApi:
             if sound_id < 0 or sound_id >= len(archive.data.sound_entries):
                 return {"ok": False, "error": f"Invalid sound id {sound_id}"}
             entry = archive.data.sound_entries[sound_id]
+            playback_changed = False
 
             if "name" in patch:
                 archive.rename_sound(int(sound_id), patch["name"])
             if "volume" in patch:
                 entry.volume = max(0, min(127, int(patch["volume"])))
+                playback_changed = True
             if "player" in patch:
                 pi = int(patch["player"])
                 if 0 <= pi < len(archive.data.player_entries):
                     entry.player_index = pi
+                else:
+                    raise ValueError(f"Invalid player index {pi}")
+            if "bank" in patch:
+                if patch["bank"] is None:
+                    raise ValueError("A sequence sound must reference a bank")
+                archive.set_sequence_sound_bank(int(sound_id), int(patch["bank"]))
+                playback_changed = True
+            if "waveArchive" in patch:
+                if patch["waveArchive"] is None:
+                    raise ValueError("A WAVE sound must reference a wave archive")
+                archive.set_wave_sound_archive(int(sound_id), int(patch["waveArchive"]))
+                playback_changed = True
             if "priority" in patch:
                 entry.player_priority = max(0, min(127, int(patch["priority"])))
+                playback_changed = True
             if "pan" in patch:
                 entry.pan_mode = max(0, min(3, int(patch.get("panMode", entry.pan_mode))))
                 entry.pan_curve = max(0, min(3, int(patch.get("panCurve", entry.pan_curve))))
+                playback_changed = True
             if "actorPlayerId" in patch:
                 entry.actor_player_id = max(0, int(patch["actorPlayerId"]))
 
             self.project_service.mark_dirty(self.session)
+            if playback_changed:
+                self._clear_audio_streams()
             return {"ok": True, "data": self._ui_data(), "dirty": True}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -5691,17 +5760,23 @@ class PysarApi:
             entry = archive.data.sound_entries[int(sound_id)]
             sound_name = self.archive_service._sound_name(archive, int(sound_id), entry)
 
-            if entry.sound_type == SoundType.WAVE:
-                archive.replace_wav_sound(sound_name, brwav, note_index=int(wav_no))
-            elif entry.sound_type == SoundType.SEQ:
-                archive.replace_seq_sound(sound_name, brwav, wav_no=int(wav_no))
-            else:
+            if entry.sound_type not in {SoundType.WAVE, SoundType.SEQ}:
                 return {"ok": False, "error": "Cannot replace samples for this sound type"}
 
-            self.project_service.mark_dirty(self.session)
-            # Clear caches so subsequent previews re-parse from updated embedded data
-            archive.clear_subfile_caches()
+            with self.project_service.archive_transaction(
+                self.session,
+                f"Replace sample in {sound_name}",
+            ) as candidate:
+                if entry.sound_type == SoundType.WAVE:
+                    candidate.replace_wav_sound(
+                        sound_name, brwav, note_index=int(wav_no),
+                    )
+                else:
+                    candidate.replace_seq_sound(
+                        sound_name, brwav, wav_no=int(wav_no),
+                    )
             self._clear_audio_streams()
+            clear_wave_payload_cache()
             return {"ok": True, "dirty": True, "data": self._ui_data()}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -5711,20 +5786,27 @@ class PysarApi:
         sound_id: int,
         path: str,
         encoding: str | None = None,
+        looped: bool | None = None,
+        loop_start: int = 0,
     ) -> dict:
         """Replace the one playable WAVE sound sample from WAV or raw BRWAV."""
         try:
-            replacement = self._replacement_brwav_from_path(path, encoding)
+            replacement = self._replacement_brwav_from_path(
+                path, encoding, looped, loop_start,
+            )
             archive = self.project_service.require_archive(self.session)
             entry = self.archive_service._sound_entry(archive, int(sound_id))
             if entry.sound_type != SoundType.WAVE:
                 return {"ok": False, "error": "Not a WAVE sound"}
 
             sound_name = self.archive_service._sound_name(archive, int(sound_id), entry)
-            archive.replace_wav_sound(sound_name, replacement, note_index=0)
-            self.project_service.mark_dirty(self.session)
-            archive.clear_subfile_caches()
+            with self.project_service.archive_transaction(
+                self.session,
+                f"Replace WAVE sound {sound_name}",
+            ) as candidate:
+                candidate.replace_wav_sound(sound_name, replacement, note_index=0)
             self._clear_audio_streams()
+            clear_wave_payload_cache()
             return {"ok": True, "dirty": True, "data": self._ui_data()}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -5745,6 +5827,7 @@ class PysarApi:
                 "soundId": int(sound_id),
                 "path": str(source),
                 "sourceFormat": source_format,
+                **self._brwav_source_options(source, source_format),
             }
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -6671,7 +6754,7 @@ class PysarApi:
             return {"ok": False, "error": str(exc)}
 
     def get_sound_delete_impact(self, sound_id: int) -> dict:
-        """Describe the conservative SOUND-row deletion shown by the UI."""
+        """Preview a SOUND-row deletion and its newly unreachable resources."""
         try:
             archive = self.project_service.require_archive(self.session)
             sound_id = int(sound_id)
@@ -6696,21 +6779,54 @@ class PysarApi:
                 int(candidate.file_index) == file_index
                 for candidate in archive.data.bank_entries
             )
+            from pysar.core.format.rsar.safety import ArchiveSnapshot
+
+            unused_before = {
+                archive._unused_resource_key(item)
+                for item in archive.list_unused_archive_resources()
+            }
+            preview = ArchiveSnapshot.capture(archive).clone()
+            # Consequence inspection is read-only and should also explain a
+            # protected row. The real transaction below still enforces Safe Mode.
+            preview.set_safe_mode(False)
+            preview.delete_sound_entry(sound_id)
+            preview.set_safe_mode(archive.safe_mode)
+            newly_unused = [
+                item for item in preview.list_unused_archive_resources()
+                if preview._unused_resource_key(item) not in unused_before
+            ]
+            before_embedded = {
+                int(embedded_id): embedded.magic
+                for embedded_id, embedded in preview.data.embedded_files.items()
+            }
+            preview.delete_selected_unused_archive_resources(newly_unused)
+            cleanup_resources = list(newly_unused)
+            cleanup_resources.extend(self._removed_embedded_resources(
+                before_embedded,
+                set(preview.data.embedded_files),
+                archive,
+            ))
             return {
                 "ok": True,
-                "sound": {"id": sound_id, "name": name, "type": entry.sound_type.name},
+                "sound": {
+                    "id": sound_id,
+                    "name": name,
+                    "type": entry.sound_type.name,
+                    "protected": archive.is_protected("sound", sound_id),
+                },
                 "backingFile": {
                     "id": file_index,
                     "kind": kind,
                     "name": file_entry.external_file_path if file_entry and file_entry.external_file_path else f"{kind}_{file_index:04d}",
                     "otherUsers": max(0, users - 1),
                 },
+                "cleanupResources": cleanup_resources,
             }
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def delete_sound(self, sound_id: int) -> dict:
-        """Delete a SOUND row transactionally without cascading into files."""
+    def delete_sound(self, sound_id: int, cleanup_unused: bool = False) -> dict:
+        """Delete a SOUND row and optionally its newly unreachable resources."""
         try:
             sound_id = int(sound_id)
             archive = self.project_service.require_archive(self.session)
@@ -6721,10 +6837,37 @@ class PysarApi:
                 f"Delete sound {name}",
                 destructive=True,
             ) as candidate:
+                unused_before = {
+                    candidate._unused_resource_key(item)
+                    for item in candidate.list_unused_archive_resources()
+                }
+                before_embedded = {
+                    int(embedded_id): embedded.magic
+                    for embedded_id, embedded in candidate.data.embedded_files.items()
+                }
                 candidate.delete_sound_entry(sound_id)
+                newly_unused = [
+                    item for item in candidate.list_unused_archive_resources()
+                    if candidate._unused_resource_key(item) not in unused_before
+                ]
+                cleanup_deleted = (
+                    candidate.delete_selected_unused_archive_resources(newly_unused)
+                    if bool(cleanup_unused) else []
+                )
+                if cleanup_deleted:
+                    cleanup_deleted.extend(self._removed_embedded_resources(
+                        before_embedded,
+                        set(candidate.data.embedded_files),
+                        candidate,
+                    ))
             self._clear_audio_streams()
             clear_wave_payload_cache()
-            return {"ok": True, "dirty": True, "data": self._ui_data()}
+            return {
+                "ok": True,
+                "dirty": True,
+                "cleanupDeleted": cleanup_deleted,
+                "data": self._ui_data(),
+            }
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -7102,6 +7245,27 @@ class PysarApi:
             }
             for item in self.archive_service.list_players(self.session)
         ]
+
+        # A WAVE sound reaches an RWAR through a logical RWSD file; it cannot
+        # reference an arbitrary physical wave archive directly.  Build the
+        # valid RWAR choices once so the inspector only offers routes whose
+        # paired RWSD contains the sound's current WSD slot.
+        wave_archive_route_counts: dict[int, int] = {}
+        for file_index in range(len(archive.data.file_entries)):
+            raw = archive._resolve_file_raw(file_index)
+            if raw is None or len(raw) < 0x2C or raw[:4] != b"RWSD":
+                continue
+            try:
+                data_offset = struct.unpack_from(">I", raw, 0x10)[0]
+                count = struct.unpack_from(">I", raw, data_offset + 8)[0]
+            except (struct.error, ValueError):
+                continue
+            _, audio_id = self.archive_service._resolve_file_index(archive, file_index)
+            if audio_id is None:
+                continue
+            embedded = archive.data.embedded_files.get(int(audio_id))
+            if embedded is not None and embedded.magic == "RWAR":
+                wave_archive_route_counts[int(audio_id)] = int(count)
         sounds = []
         for item in self.archive_service.list_sounds(self.session):
             entry = archive.data.sound_entries[item.sound_id] if item.sound_id < len(archive.data.sound_entries) else None
@@ -7122,6 +7286,13 @@ class PysarApi:
                 "isNew": archive.is_new("sound", item.sound_id),
                 "protected": archive.is_protected("sound", item.sound_id),
             }
+            if entry is not None and entry.sound_type == SoundType.WAVE:
+                required_slot = int(getattr(entry.sound_info, "wave_index", -1))
+                sound_data["compatibleAudioFileIds"] = [
+                    file_id
+                    for file_id, count in sorted(wave_archive_route_counts.items())
+                    if 0 <= required_slot < count
+                ]
             if entry is not None and entry.sound_type == SoundType.STRM:
                 file_entry = archive.data.file_entries[entry.file_index]
                 sound_data.update({
