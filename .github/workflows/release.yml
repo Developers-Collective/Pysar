@@ -1,9 +1,9 @@
 name: Release
 
 on:
-  #push:
-  #  branches:
-  #    - main
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       tag:
@@ -16,6 +16,7 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
   BUILD_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
 
 jobs:
@@ -33,6 +34,11 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           architecture: x64
           cache: pip
+
+      - name: Set up GUI compiler
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Check release tag and package version
         if: github.event_name == 'workflow_dispatch'
@@ -54,6 +60,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install ".[build]"
 
+      - name: Precompile packaged GUI
+        run: node scripts/prepare_packaged_gui.mjs build/packaged_gui
+
       - name: Build Pysar
         run: >-
           pyinstaller
@@ -63,7 +72,7 @@ jobs:
           --onefile
           --name Pysar
           --icon resources/logo/pysar.ico
-          --add-data "pysar/gui;pysar/gui"
+          --add-data "build/packaged_gui;pysar/gui"
           --add-data "resources;resources"
           pysar.py
 
@@ -119,6 +128,11 @@ jobs:
           architecture: x64
           cache: pip
 
+      - name: Set up GUI compiler
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
       - name: Check release tag and package version
         if: github.event_name == 'workflow_dispatch'
         shell: python
@@ -139,6 +153,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install ".[build]"
 
+      - name: Precompile packaged GUI
+        run: node scripts/prepare_packaged_gui.mjs build/packaged_gui
+
       - name: Build Pysar
         run: >-
           pyinstaller
@@ -147,7 +164,7 @@ jobs:
           --windowed
           --onefile
           --name Pysar
-          --add-data "pysar/gui:pysar/gui"
+          --add-data "build/packaged_gui:pysar/gui"
           --add-data "resources:resources"
           pysar.py
 
