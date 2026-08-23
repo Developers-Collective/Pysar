@@ -2079,6 +2079,22 @@ class Brsar(EditorBase):
         self._discard_orphan_new_seq_file(file_index)
         self.mark_dirty(DirtyFlags.DATA)
 
+    def delete_sound_entry(self, sound_index: int) -> None:
+        """Delete only one SOUND row while retaining its backing payload.
+
+        This is the conservative operation used by the general UI Delete
+        action. RSEQ, RWSD/RWAR, and external stream data remain available for
+        reuse or an explicit cleanup operation later.
+        """
+        sound_index = int(sound_index)
+        if not 0 <= sound_index < len(self._data.sound_entries):
+            raise BrsarError(f"Invalid sound index {sound_index}")
+        self.require_safe_deletion("sound", sound_index)
+        del self._data.sound_entries[sound_index]
+        self.remap_provenance_after_delete("sound", sound_index)
+        self._rebuild_sound_trie()
+        self.mark_dirty(DirtyFlags.DATA)
+
     def _discard_orphan_new_seq_file(self, file_index: int) -> bool:
         """Remove bytes/group links for an unreferenced, Pysar-created RSEQ.
 

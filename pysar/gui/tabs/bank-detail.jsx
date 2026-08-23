@@ -30,7 +30,7 @@ function zoneColor(waveIndex) {
   return ZONE_PALETTE[i % ZONE_PALETTE.length];
 }
 
-function BankDetail({ bank, onNavigate, onDirty, onDataRefresh, onPlaybackInvalidate, onError, onPlayNote, playingNote }) {
+function BankDetail({ bank, refreshRevision = 0, onNavigate, onDirty, onDataRefresh, onPlaybackInvalidate, onError, onPlayNote, playingNote, onReplace, onExport, onRename, onDelete }) {
   const [details, setDetails] = useStateB(null);
   const [loading, setLoading] = useStateB(true);
   const [error, setError] = useStateB(null);
@@ -70,7 +70,7 @@ function BankDetail({ bank, onNavigate, onDirty, onDataRefresh, onPlaybackInvali
     return () => { cancelled = true; };
   // Safe Mode changes the protection flags returned for instruments/zones,
   // even though the selected bank ID stays the same.
-  }, [bank.id, bank.protected]);
+  }, [bank.id, bank.protected, refreshRevision]);
 
   React.useEffect(() => { setSelectedZone(0); }, [activeProg]);
 
@@ -86,79 +86,14 @@ function BankDetail({ bank, onNavigate, onDirty, onDataRefresh, onPlaybackInvali
     onDataRefresh?.(result.archiveData);
   }
 
-  function applyFileResult(result) {
-    if (!result?.ok) {
-      if (!result?.cancelled) reportError(result?.error || "Bank operation failed");
-      return false;
-    }
-    if (result.dirty) onDirty?.(true);
-    if (result.data?.instruments) {
-      setDetails(result.data);
-      const nextActive = result.data.instruments.find((item) => item.program === activeProg && !item.isEmpty)
-        || result.data.instruments.find((item) => !item.isEmpty)
-        || null;
-      setActiveProg(nextActive?.program ?? null);
-      setSelectedZone(0);
-    }
-    refreshArchiveMetadata(result);
-    if (result.warnings?.length) {
-      window.pysarAlert(result.warnings.join("\n"), { title: "Bank imported with warnings" });
-    }
-    return true;
-  }
-
-  async function exportBank() {
-    if (!window.pysar || fileBusy) return;
+  async function runBankAction(action) {
+    if (!action || fileBusy) return;
     setFileBusy(true);
-    let result = await window.pysar.call("export_bank_dialog", bank.id)
-      .catch((e) => ({ ok: false, error: String(e) }));
-    if (result?.requiresCompanionOverwrite) {
-      const confirmed = await window.pysarConfirm(
-        `A different companion wave archive already exists at:\n\n${result.companionPath}\n\nReplace it together with the BRBNK?`,
-        {
-          title: "Replace companion BRWAR",
-          confirmLabel: "Replace both files",
-          danger: true,
-        },
-      );
-      if (confirmed) {
-        result = await window.pysar.call(
-          "export_bank_to_path",
-          bank.id,
-          result.path,
-          result.format || "brbnk",
-          true,
-        ).catch((e) => ({ ok: false, error: String(e) }));
-      } else {
-        setFileBusy(false);
-        return;
-      }
+    try {
+      await action(bank);
+    } finally {
+      setFileBusy(false);
     }
-    setFileBusy(false);
-    if (!result?.ok && !result?.cancelled) reportError(result?.error || "Bank export failed");
-    if (result?.ok && result.warnings?.length) {
-      await window.pysarAlert(result.warnings.join("\n"), { title: "Bank exported with warnings" });
-    }
-  }
-
-  async function replaceBank(importFormat, confirmShared = false) {
-    if (!window.pysar || fileBusy) return;
-    setFileBusy(true);
-    let result = await window.pysar.call("replace_bank_dialog", bank.id, confirmShared, importFormat)
-      .catch((e) => ({ ok: false, error: String(e) }));
-    setFileBusy(false);
-    if (result?.requiresConfirmation) {
-      const names = (result.sharedBanks || []).join(", ");
-      if (await window.pysarConfirm(`This bank file is shared by: ${names}. Replace it for all of them?`, {
-        title: "Replace shared bank file",
-        confirmLabel: "Replace for all",
-        danger: true,
-      })) {
-        await replaceBank(importFormat, true);
-      }
-      return;
-    }
-    applyFileResult(result);
   }
 
   async function updateZone(program, zoneIndex, patch) {
@@ -257,9 +192,10 @@ function BankDetail({ bank, onNavigate, onDirty, onDataRefresh, onPlaybackInvali
             {instrumentBusy ? "Adding…" : "New instrument"}
           </Button>
           <span className="sep"></span>
-          <Button ghost onClick={exportBank} disabled={fileBusy}>Export</Button>
-          <Button onClick={() => replaceBank("brbnk")} disabled={fileBusy}>Replace BRBNK</Button>
-          <Button onClick={() => replaceBank("sf2")} disabled={fileBusy}>Import SF2</Button>
+          <Button onClick={() => runBankAction(onReplace)} disabled={fileBusy || !onReplace}>Replace</Button>
+          <Button onClick={() => runBankAction(onExport)} disabled={fileBusy || !onExport}>Export</Button>
+          <Button onClick={() => runBankAction(onRename)} disabled={fileBusy || !!bank.protected || !onRename} title={bank.protected ? "Safe Mode protects this original bank" : "Rename bank"}>Rename</Button>
+          <Button className="danger" onClick={() => runBankAction(onDelete)} disabled={fileBusy || !!bank.protected || !onDelete} title={bank.protected ? "Safe Mode protects this original bank" : "Delete bank"}>Delete</Button>
         </div>
         <div className="empty-state">
           <div className="empty-card" style={{ borderStyle: "solid" }}>
@@ -288,9 +224,10 @@ function BankDetail({ bank, onNavigate, onDirty, onDataRefresh, onPlaybackInvali
             {instrumentBusy ? "Adding…" : "New instrument"}
           </Button>
           <span className="sep"></span>
-          <Button ghost onClick={exportBank} disabled={fileBusy}>Export</Button>
-          <Button onClick={() => replaceBank("brbnk")} disabled={fileBusy}>Replace BRBNK</Button>
-          <Button onClick={() => replaceBank("sf2")} disabled={fileBusy}>Import SF2</Button>
+          <Button onClick={() => runBankAction(onReplace)} disabled={fileBusy || !onReplace}>Replace</Button>
+          <Button onClick={() => runBankAction(onExport)} disabled={fileBusy || !onExport}>Export</Button>
+          <Button onClick={() => runBankAction(onRename)} disabled={fileBusy || instrumentBusy || !!bank.protected || !onRename} title={bank.protected ? "Safe Mode protects this original bank" : "Rename bank"}>Rename</Button>
+          <Button className="danger" onClick={() => runBankAction(onDelete)} disabled={fileBusy || instrumentBusy || !!bank.protected || !onDelete} title={bank.protected ? "Safe Mode protects this original bank" : "Delete bank"}>Delete</Button>
           <span className="grow"></span>
           <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontFamily: "var(--font-mono)" }}>
             {details.activeInstrumentCount}/{details.instrumentCount} active · {details.waveCount} waves

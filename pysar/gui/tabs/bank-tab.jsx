@@ -1,4 +1,4 @@
-function BanksTab({ onSelect, onActivate, onRename, onDelete, openId, query, onDataRefresh, onDirty, onError }) {
+function BanksTab({ onSelect, onActivate, onReplace, onExport, onRename, onDelete, openId, query, onDataRefresh, onDirty, onError }) {
   const [, setRevision] = React.useState(0);
   const [busy, setBusy] = React.useState(false);
   const D = window.PYSAR_DATA;
@@ -43,10 +43,10 @@ function BanksTab({ onSelect, onActivate, onRename, onDelete, openId, query, onD
     applyResult(result, "Create bank");
   }
 
-  async function importBank(importFormat) {
+  async function importBank() {
     if (!window.pysar || busy) return;
     setBusy(true);
-    const result = await window.pysar.call("import_bank_dialog", importFormat)
+    const result = await window.pysar.call("import_bank_dialog")
       .catch((error) => ({ ok: false, error: String(error) }));
     setBusy(false);
     applyResult(result, "Import bank");
@@ -65,10 +65,10 @@ function BanksTab({ onSelect, onActivate, onRename, onDelete, openId, query, onD
   return (
     <>
       <div className="toolbar">
-        <Button onClick={createBank} disabled={busy}>New</Button>
-        <Button ghost onClick={() => importBank("brbnk")} disabled={busy}>Import BRBNK</Button>
-        <Button ghost onClick={() => importBank("sf2")} disabled={busy}>Import SF2</Button>
-        <span className="sep"></span>
+        <Button primary onClick={createBank} disabled={busy}>New</Button>
+        <Button onClick={importBank} disabled={busy} title="Import a new bank from BRBNK or SF2">Import</Button>
+        <Button disabled={!active || busy} onClick={() => runSelected(onReplace)} title="Replace the selected bank from BRBNK or SF2">Replace</Button>
+        <Button disabled={!active || busy} onClick={() => runSelected(onExport)} title="Export the selected bank as BRBNK or SF2">Export</Button>
         <Button
           disabled={!active || busy || !!active?.protected}
           onClick={() => runSelected(onRename)}

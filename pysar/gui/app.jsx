@@ -176,6 +176,7 @@ function App() {
   const [historyIndex, setHistoryIndex] = useStateA(0);
   const [draggingTabId, setDraggingTabId] = useStateA(null);
   const [dataRevision, setDataRevision] = useStateA(0);
+  const [bankContentRevision, setBankContentRevision] = useStateA(0);
 
   // dirty / unsaved state
   const [dirty, setDirty] = useStateA(false);
@@ -3248,6 +3249,116 @@ function App() {
     });
   }
 
+  async function replaceBank(bank) {
+    if (!window.pysar || bank?.id == null) return false;
+    return runBankMutation(async () => {
+      let result = await window.pysar.call("replace_bank_dialog", bank.id, false)
+        .catch((error) => ({ ok: false, error: String(error) }));
+      if (result?.requiresConfirmation) {
+        const sharedBanks = result.sharedBanks || [];
+        const choice = await window.pysarConsequence(
+          `${bank.name || `Bank #${bank.id}`} shares its RBNK data with other bank entries.`,
+          {
+            title: "Replace shared bank data",
+            caption: "Banks that will receive the replacement",
+            actions: [{
+              id: "replace-all",
+              label: "Replace for all",
+              description: "Every bank listed below will use the selected BRBNK or SF2 data.",
+              confirmLabel: "Choose replacement file",
+              tone: "danger",
+            }],
+            resources: sharedBanks.map((name, index) => ({
+              id: `bank-${index}`,
+              resource: { badge: "BANK", name },
+              outcomes: {
+                "replace-all": {
+                  text: "Shared RBNK data will be replaced",
+                  status: "modified",
+                },
+              },
+            })),
+          },
+        );
+        if (choice?.action !== "replace-all") return false;
+        result = await window.pysar.call("replace_bank_dialog", bank.id, true)
+          .catch((error) => ({ ok: false, error: String(error) }));
+      }
+      if (!result?.ok) {
+        if (!result?.cancelled) setOpenError(result?.error || "Bank replacement failed");
+        return false;
+      }
+      invalidateBankSequencePlayback(bank.id);
+      if (result.dirty) setDirty(true);
+      if (result.archiveData) handleDataRefresh(result.archiveData);
+      setBankContentRevision((revision) => revision + 1);
+      if (result.warnings?.length) {
+        await window.pysarAlert(result.warnings.join("\n"), {
+          title: "Bank imported with warnings",
+        });
+      }
+      return true;
+    });
+  }
+
+  async function exportBank(bank) {
+    if (!window.pysar || bank?.id == null) return false;
+    return runBankMutation(async () => {
+      let result = await window.pysar.call("export_bank_dialog", bank.id)
+        .catch((error) => ({ ok: false, error: String(error) }));
+      if (result?.requiresCompanionOverwrite) {
+        const choice = await window.pysarConsequence(
+          "The BRBNK export has a companion BRWAR, but a different file already exists at that destination.",
+          {
+            title: "Overwrite companion BRWAR",
+            caption: "Files that will be written",
+            actions: [{
+              id: "overwrite",
+              label: "Export and overwrite",
+              description: "Write the BRBNK and replace the existing companion BRWAR as one atomic operation.",
+              confirmLabel: "Overwrite and export",
+              tone: "danger",
+            }],
+            resources: [
+              {
+                id: "bank-file",
+                resource: { badge: "RBNK", name: result.path || `${bank.name}.brbnk` },
+                outcomes: {
+                  overwrite: { text: "Export file will be written", status: "modified" },
+                },
+              },
+              {
+                id: "wave-file",
+                resource: { badge: "RWAR", name: result.companionPath },
+                outcomes: {
+                  overwrite: { text: "Existing companion will be overwritten", status: "warning" },
+                },
+              },
+            ],
+          },
+        );
+        if (choice?.action !== "overwrite") return false;
+        result = await window.pysar.call(
+          "export_bank_to_path",
+          bank.id,
+          result.path,
+          result.format || "brbnk",
+          true,
+        ).catch((error) => ({ ok: false, error: String(error) }));
+      }
+      if (!result?.ok) {
+        if (!result?.cancelled) setOpenError(result?.error || "Bank export failed");
+        return false;
+      }
+      if (result.warnings?.length) {
+        await window.pysarAlert(result.warnings.join("\n"), {
+          title: "Bank exported with warnings",
+        });
+      }
+      return true;
+    });
+  }
+
   async function deleteBank(bank) {
     if (!window.pysar || bank?.id == null) return false;
     return runBankMutation(async () => {
@@ -3351,14 +3462,53 @@ function App() {
     }
   }
 
-  async function deleteSeqSound(sound) {
+  async function deleteSound(sound) {
     if (!window.pysar || sound?.id == null) return;
-    if (!await window.pysarConfirm(`Delete ${sound.name || `sequence sound #${sound.id}`}?`, {
-      title: "Delete sequence sound",
-      confirmLabel: "Delete",
-      danger: true,
-    })) return;
-    const result = await window.pysar.call("delete_seq_sound", sound.id)
+    const impact = await window.pysar.call("get_sound_delete_impact", sound.id)
+      .catch((error) => ({ ok: false, error: String(error) }));
+    if (!impact?.ok) {
+      setOpenError(impact?.error || "Could not inspect the sound");
+      return;
+    }
+    const backing = impact.backingFile || {};
+    const choice = await window.pysarConsequence(
+      `Delete ${sound.name || `sound #${sound.id}`} from the archive's sound list?`,
+      {
+        title: "Delete sound",
+        caption: "Exact consequences",
+        actions: [{
+          id: "delete",
+          label: "Delete sound only",
+          description: "Keep its backing sequence, wave, or stream data for reuse and later cleanup.",
+          confirmLabel: "Delete sound",
+          tone: "danger",
+        }],
+        resources: [
+          {
+            id: "sound",
+            resource: { badge: sound.type || "SOUND", name: `${sound.name} [${sound.id}]` },
+            outcomes: {
+              delete: { text: "Sound entry will be deleted", status: "deleted" },
+            },
+          },
+          {
+            id: "backing-file",
+            resource: {
+              badge: backing.kind || "FILE",
+              name: backing.name || `File #${backing.id}`,
+              detail: backing.otherUsers
+                ? `${backing.otherUsers} other archive reference${backing.otherUsers === 1 ? "" : "s"}`
+                : "No other direct sound or bank references",
+            },
+            outcomes: {
+              delete: { text: "Backing data will be retained", status: "retained" },
+            },
+          },
+        ],
+      },
+    );
+    if (choice?.action !== "delete") return;
+    const result = await window.pysar.call("delete_sound", sound.id)
       .catch((error) => ({ ok: false, error: String(error) }));
     if (!result?.ok) {
       setOpenError(result?.error || "Delete failed");
@@ -3382,6 +3532,10 @@ function App() {
     // Numeric sound identities after the removed row may shift, so no cached
     // selection may safely retain its old key.
     setSeqVariationBySound({});
+    strmPlaybackRevisionRef.current += 1;
+    strmPlaybackLoadsRef.current.clear();
+    strmPlaybackBySoundRef.current = {};
+    setStrmPlaybackBySound({});
     if (result.dirty) setDirty(true);
     if (result.data) handleDataRefresh(result.data);
     // Sound-table IDs after the removed row shift down. Close sound detail
@@ -3390,10 +3544,11 @@ function App() {
       const remaining = current.filter((item) => item.kind !== "sound");
       return remaining.length ? remaining : [{ id: "all", kind: "view", view: "all", title: "All sounds" }];
     });
-    const sequenceView = tabs.find((item) => item.kind === "view" && item.view === "sequences");
-    setActiveTab(sequenceView?.id || "all");
-    setNavView(sequenceView ? "sequences" : "all");
-    setSoundFilter(sequenceView ? "SEQ" : "ALL");
+    const desiredView = { SEQ: "sequences", WAVE: "waves", STRM: "streams" }[sound.type];
+    const resourceView = tabs.find((item) => item.kind === "view" && item.view === desiredView);
+    setActiveTab(resourceView?.id || "all");
+    setNavView(resourceView?.view || "all");
+    setSoundFilter(resourceView ? sound.type : "ALL");
     setSelectedItem(null);
   }
 
@@ -3501,10 +3656,11 @@ function App() {
       onReplaceSound: requestSoundReplacement,
       onExportSound: exportSound,
       onRenameSound: renameSound,
+      onDeleteSound: deleteSound,
       selectedSoundId: selectedItem?.kind === "sound" ? selectedItem.id : null,
     };
     if (tab.view === "all") content = <SoundsScreen filter={soundFilter} onFilterChange={changeSoundFilter} query={searchQuery} onClearSearch={() => setSearchQuery("")} onOpen={selectOnly} onActivate={openSound} onWarm={warmSoundPreview} onVisibleSoundsChange={rememberVisibleSounds} openId={selectedItem?.kind === "sound" ? selectedItem.id : null} density={tw.density} onPlay={play} playingId={playingId && isPlaying ? playingId : null} {...soundTableActions} />;
-    else if (tab.view === "banks") content = <BanksTab query={searchQuery} onSelect={selectOrgItem} onActivate={openItem} onRename={renameBank} onDelete={deleteBank} openId={selectedItem?.kind === "bank" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
+    else if (tab.view === "banks") content = <BanksTab query={searchQuery} onSelect={selectOrgItem} onActivate={openItem} onReplace={replaceBank} onExport={exportBank} onRename={renameBank} onDelete={deleteBank} openId={selectedItem?.kind === "bank" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
     else if (tab.view === "groups") content = <GroupsTab query={searchQuery} onOpen={selectOrgItem} onNavigate={navigateToReferrer} openId={selectedItem?.kind === "group" ? selectedItem.id : null} safeMode={safeMode} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
     else if (tab.view === "players") content = <PlayersTab query={searchQuery} onOpen={selectOrgItem} onRename={renamePlayer} onClear={() => setSelectedItem(null)} openId={selectedItem?.kind === "player" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
     else if (tab.view === "archives") content = <ArchivesTab query={searchQuery} onOpen={selectOrgItem} onActivate={openItem} onNavigate={navigateToReferrer} onClear={() => setSelectedItem(null)} openId={selectedItem?.kind === "archive" ? selectedItem.id : null} onDataRefresh={handleDataRefresh} onDirty={setDirty} onError={setOpenError} />;
@@ -3530,7 +3686,7 @@ function App() {
           onPlaybackInvalidate={invalidateSequencePlayback}
           onError={setOpenError}
           onRename={renameSound}
-          onDelete={deleteSeqSound}
+          onDelete={deleteSound}
         />
       );
     } else if (tab.item.type === "STRM") {
@@ -3545,6 +3701,7 @@ function App() {
           onReplace={requestSoundReplacement}
           onExport={exportSound}
           onRename={renameSound}
+          onDelete={deleteSound}
         />
       );
     } else {
@@ -3558,11 +3715,13 @@ function App() {
         onReplace={requestSoundReplacement}
         onExport={exportSound}
         onRename={renameSound}
+        onDelete={deleteSound}
       />;
     }
   } else if (tab.kind === "bank") {
     content = <BankDetail
       bank={tab.item}
+      refreshRevision={bankContentRevision}
       onNavigate={navigateToReferrer}
       onDirty={setDirty}
       onDataRefresh={handleDataRefresh}
@@ -3570,6 +3729,10 @@ function App() {
       onError={setOpenError}
       onPlayNote={(program, key) => playBankNote(tab.item, program, key)}
       playingNote={playingSound?.kind === "bank_note" && isPlaying ? playingSound : null}
+      onReplace={replaceBank}
+      onExport={exportBank}
+      onRename={renameBank}
+      onDelete={deleteBank}
     />;
   } else if (tab.kind === "archive") {
     const focusWave = (selectedItem?.kind === "wave" && selectedItem?.item?.archiveId === tab.item.id)
@@ -3834,7 +3997,10 @@ function App() {
             onNavigateReferrer={navigateToReferrer}
             onUpdateSound={updateSoundProperty}
             onRenameSound={renameSound}
+            onDeleteSound={deleteSound}
             onRenameBank={renameBank}
+            onReplaceBank={replaceBank}
+            onExportBank={exportBank}
             onDeleteBank={deleteBank}
             onUpdateGroup={updateGroupProperty}
             onUpdatePlayer={updatePlayerProperty}

@@ -26,7 +26,7 @@ const SOUND_TABLE_COLUMNS = [
   ...SOUND_COLUMNS,
 ];
 
-function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, onOpen, onActivate, onWarm, onVisibleSoundsChange, openId, density, onPlay, playingId, onAddSound, onReplaceSound, onExportSound, onRenameSound, selectedSoundId }) {
+function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, onOpen, onActivate, onWarm, onVisibleSoundsChange, openId, density, onPlay, playingId, onAddSound, onReplaceSound, onExportSound, onRenameSound, onDeleteSound, selectedSoundId }) {
   const D = window.PYSAR_DATA;
   const [sortBy, setSortBy] = useStateS("id");
   const [sortDir, setSortDir] = useStateS("asc");
@@ -182,6 +182,12 @@ function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, on
             disabled={!selectedSound || !!selectedSound.protected}
             title={selectedSound?.protected ? "Safe Mode protects this original sound" : "Rename selected sound"}
           >Rename</Button>
+          <Button
+            className="danger"
+            onClick={() => selectedSound && onDeleteSound?.(selectedSound)}
+            disabled={!selectedSound || !!selectedSound.protected}
+            title={selectedSound?.protected ? "Safe Mode protects this original sound" : "Delete selected sound"}
+          >Delete</Button>
         </div>
       </div>
 
@@ -253,7 +259,7 @@ function SoundsScreen({ filter = "ALL", onFilterChange, query, onClearSearch, on
   );
 }
 
-function StreamSoundDetail({ sound, onPlay, onNavigate, onPlaybackInvalidate, onReplace, onExport, onRename, playingId, refreshRevision = 0 }) {
+function StreamSoundDetail({ sound, onPlay, onNavigate, onPlaybackInvalidate, onReplace, onExport, onRename, onDelete, playingId, refreshRevision = 0 }) {
   const [playheadMs, setLivePlayheadMs] = useStateS(() => window.PysarPlayheadStore.getSnapshot());
   const D = window.PYSAR_DATA;
   const [details, setDetails] = useStateS(null);
@@ -375,6 +381,7 @@ function StreamSoundDetail({ sound, onPlay, onNavigate, onPlaybackInvalidate, on
             disabled={!!sound.protected}
             title={sound.protected ? "Safe Mode protects this original sound" : "Rename sound"}
           >Rename</Button>
+          <Button className="danger" onClick={() => onDelete?.(sound)} disabled={!!sound.protected} title={sound.protected ? "Safe Mode protects this original sound" : "Delete sound"}>Delete</Button>
         </div>
       </div>
 
@@ -495,7 +502,7 @@ function StreamSoundDetail({ sound, onPlay, onNavigate, onPlaybackInvalidate, on
   );
 }
 
-function SoundDetail({ sound, onPlay, onNavigate, onReplace, onExport, onRename, playingId, playingSoundId = null, durationMs = 0 }) {
+function SoundDetail({ sound, onPlay, onNavigate, onReplace, onExport, onRename, onDelete, playingId, playingSoundId = null, durationMs = 0 }) {
   const [playheadMs, setLivePlayheadMs] = useStateS(() => window.PysarPlayheadStore.getSnapshot());
   const D = window.PYSAR_DATA;
   const bank = D.banks.find(b => b.id === sound.bank);
@@ -568,6 +575,7 @@ function SoundDetail({ sound, onPlay, onNavigate, onReplace, onExport, onRename,
             disabled={!!sound.protected}
             title={sound.protected ? "Safe Mode protects this original sound" : "Rename sound"}
           >Rename</Button>
+          <Button className="danger" onClick={() => onDelete?.(sound)} disabled={!!sound.protected} title={sound.protected ? "Safe Mode protects this original sound" : "Delete sound"}>Delete</Button>
         </div>
       </div>
 

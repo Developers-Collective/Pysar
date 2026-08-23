@@ -1,4 +1,4 @@
-function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onRenameBank, onDeleteBank, onUpdateGroup, onUpdatePlayer, onRenamePlayer, onDeleteGroup, onReplaceSound, onExportSound, onReplaceWave, onExportWave }) {
+function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDeleteSound, onRenameBank, onReplaceBank, onExportBank, onDeleteBank, onUpdateGroup, onUpdatePlayer, onRenamePlayer, onDeleteGroup, onReplaceSound, onExportSound, onReplaceWave, onExportWave }) {
   const D = window.PYSAR_DATA;
   // SOUND properties
   if (item.kind === "sound") {
@@ -55,6 +55,9 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onRenam
                 Export
               </button>
             )}
+            <button className="tb-btn danger" disabled={!!s.protected} onClick={() => onDeleteSound?.(s)}>
+              Delete
+            </button>
           </div>
         </CollapsibleSection>
       </>
@@ -79,6 +82,12 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onRenam
         </CollapsibleSection>
         <CollapsibleSection title="Actions">
           <div className="inspector-actions">
+            <button className="tb-btn" onClick={() => onReplaceBank?.(b)}>
+              Replace
+            </button>
+            <button className="tb-btn" onClick={() => onExportBank?.(b)}>
+              Export
+            </button>
             <button className="tb-btn" disabled={!!b.protected} onClick={() => onRenameBank?.(b)}>
               Rename
             </button>

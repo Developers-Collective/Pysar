@@ -6024,6 +6024,64 @@ class PysarApi:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    def get_sound_delete_impact(self, sound_id: int) -> dict:
+        """Describe the conservative SOUND-row deletion shown by the UI."""
+        try:
+            archive = self.project_service.require_archive(self.session)
+            sound_id = int(sound_id)
+            entry = self.archive_service._sound_entry(archive, sound_id)
+            name = self.archive_service._sound_name(archive, sound_id, entry)
+            file_index = int(entry.file_index)
+            file_entry = (
+                archive.data.file_entries[file_index]
+                if 0 <= file_index < len(archive.data.file_entries)
+                else None
+            )
+            raw = archive._resolve_file_raw(file_index) if file_entry is not None else None
+            kind = (
+                raw[:4].decode("ascii", errors="replace")
+                if raw
+                else ("EXTERNAL" if file_entry and file_entry.external_file_path else "FILE")
+            )
+            users = sum(
+                int(candidate.file_index) == file_index
+                for candidate in archive.data.sound_entries
+            ) + sum(
+                int(candidate.file_index) == file_index
+                for candidate in archive.data.bank_entries
+            )
+            return {
+                "ok": True,
+                "sound": {"id": sound_id, "name": name, "type": entry.sound_type.name},
+                "backingFile": {
+                    "id": file_index,
+                    "kind": kind,
+                    "name": file_entry.external_file_path if file_entry and file_entry.external_file_path else f"{kind}_{file_index:04d}",
+                    "otherUsers": max(0, users - 1),
+                },
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def delete_sound(self, sound_id: int) -> dict:
+        """Delete a SOUND row transactionally without cascading into files."""
+        try:
+            sound_id = int(sound_id)
+            archive = self.project_service.require_archive(self.session)
+            entry = self.archive_service._sound_entry(archive, sound_id)
+            name = self.archive_service._sound_name(archive, sound_id, entry)
+            with self.project_service.archive_transaction(
+                self.session,
+                f"Delete sound {name}",
+                destructive=True,
+            ) as candidate:
+                candidate.delete_sound_entry(sound_id)
+            self._clear_audio_streams()
+            clear_wave_payload_cache()
+            return {"ok": True, "dirty": True, "data": self._ui_data()}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def export_sequence_dialog(self, sound_id: int, export_format: str) -> dict:
         """Export a SEQ explicitly as BRSEQ or MIDI from its editor toolbar."""
         if self._window is None:
