@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,11 @@ name = "pysar"
 version = "1.0.0"
 description = "The first fully-fledged Nintendo Wii BRSAR editor"
 readme = "README.md"
+license = "MPL-2.0 AND MIT"
+license-files = [
+    "LICENSE",
+    "third_party_licenses/*",
+]
 requires-python = ">=3.11,<3.14"
 authors = [
     { name = "Ogu99" },

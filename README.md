@@ -26,6 +26,7 @@ This is an independent project and is not affiliated with or endorsed by Nintend
 - Use safe mode while exploring, then explicitly enable archive-changing operations when you are ready.
 
 ## Downloading Pysar
+*Important note:  As of now, no built release exists. They will be available with Pysar v1.1.0. So for the time being, run it from source (and make sure to regularly pull the newest changes from the repo).*
 
 Ready-to-run builds are published on the [Releases page](https://github.com/Developers-Collective/Pysar/releases/latest) for 64-bit Windows and Linux.
 
@@ -98,21 +99,22 @@ python pysar.py
 
 After installation, the `pysar` command starts the same application. Set `PYSAR_DEBUG=1` before launching if you need pywebview's developer/debug mode.
 
-## Making a release
-
-The release workflow runs when a version tag is pushed. Before tagging, update the version in both `pyproject.toml` and `pysar/__init__.py`, then create a matching (non-existent) tag:
-
-```bash
-git tag v1.0.1
-git push origin v1.0.1
-```
-
-GitHub Actions checks that the tag matches Pysar's version, builds Windows and Linux bundles on their native runners, creates the GitHub release, and attaches both archives plus `SHA256SUMS.txt`. Release notes are generated from the commits and pull requests since the previous tag.
-
 ## Credits
 
 Pysar (c) 2026 made by
 [Ogu99](https://github.com/Ogu-99) and
 [Nin0](https://github.com/N-I-N-0)
 
-Huge thanks to [RedStoneMatt](https://github.com/RedStoneMatt) for providing additional technical and mental (xD) help.
+Huge thanks to:
+- [RedStoneMatt](https://github.com/RedStoneMatt) for providing additional technical and mental (xD) help
+- [0D](https://github.com/redditchung) for extensive testing and bug reporting (he was taking it apart like Lego).
+
+## License
+
+Pysar is licensed under the [Mozilla Public License 2.0](LICENSE).
+
+## Third-party software
+
+Pysar includes React and ReactDOM 18.3.1 and Babel Standalone 7.29.0,
+which are distributed under the MIT License. See
+[third-party licenses](third_party_licenses/) for their complete notices.
