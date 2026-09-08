@@ -34,6 +34,13 @@ from pysar.seq.runtime import INVALID_ENVELOPE
 from pysar.seq.types import PlaybackContext
 
 
+_SAMPLE_IMPORT_FILE_TYPES = (
+    "Audio samples (*.wav;*.rwav;*.brwav)",
+    "WAV audio (*.wav)",
+    "Nintendo RWAV (*.rwav;*.brwav)",
+)
+
+
 def _empty_ui_data() -> dict[str, Any]:
     return {
         "archive": None,
@@ -5131,7 +5138,7 @@ class PysarApi:
         if not source.is_file():
             raise ValueError(f"Replacement file does not exist: {source}")
         suffix = source.suffix.lower()
-        if suffix == ".brwav":
+        if suffix in {".rwav", ".brwav"}:
             wave = Brwav.from_bytes(source.read_bytes())
             if looped is not None:
                 wave.set_loop(bool(looped), int(loop_start), loop_end)
@@ -5149,19 +5156,15 @@ class PysarApi:
                 loop_start=int(loop_start) if bool(looped) else -1,
                 loop_end=int(loop_end) if bool(looped) and loop_end is not None else -1,
             )
-        raise ValueError("Choose a .brwav or uncompressed mono .wav file")
+        raise ValueError("Choose a .rwav, .brwav, or uncompressed mono .wav file")
 
     def _choose_brwav_replacement_source(self) -> tuple[Path, str] | None:
-        source = self._choose_import_path((
-            "Audio samples (*.wav;*.brwav)",
-            "WAV audio (*.wav)",
-            "Nintendo BRWAV (*.brwav)",
-        ))
+        source = self._choose_import_path(_SAMPLE_IMPORT_FILE_TYPES)
         if source is None:
             return None
         suffix = source.suffix.lower()
-        if suffix not in {".wav", ".brwav"}:
-            raise ValueError("Choose a .brwav or uncompressed mono .wav file")
+        if suffix not in {".wav", ".rwav", ".brwav"}:
+            raise ValueError("Choose a .rwav, .brwav, or uncompressed mono .wav file")
         return source, "WAV" if suffix == ".wav" else "BRWAV"
 
     @staticmethod
@@ -6478,24 +6481,32 @@ class PysarApi:
 
     @staticmethod
     def _wav_file_info(path: str) -> dict:
+        """Inspect WAV or native RWAV samples without encoding the source."""
         from pysar.core.format.rwav import Brwav
 
         wav_path = Path(str(path)).expanduser()
         if not wav_path.is_file():
-            raise FileNotFoundError(f"WAV file not found: {path}")
-        brwav = Brwav.from_wav(str(wav_path))
+            raise FileNotFoundError(f"Audio sample not found: {path}")
+        if wav_path.suffix.lower() == ".wav":
+            return {"sourceFormat": "WAV", **PysarApi._brstm_source_wav_info(str(wav_path))}
+        if wav_path.suffix.lower() not in {".rwav", ".brwav"}:
+            raise ValueError("Choose a .wav, .rwav, or .brwav file")
+        brwav = Brwav.open(wav_path)
         encoding = brwav.encoding.name if hasattr(brwav.encoding, "name") else str(brwav.encoding)
         sample_rate = max(1, int(brwav.sample_rate))
         sample_count = int(brwav.n_samples)
         return {
             "path": str(wav_path),
             "name": wav_path.name,
+            "sourceFormat": "BRWAV",
             "encoding": encoding,
             "sampleRate": sample_rate,
             "channels": int(brwav.n_channels),
             "samples": sample_count,
             "durationMs": int(round(sample_count * 1000 / sample_rate)),
             "looped": bool(brwav.is_looped),
+            "loopStart": int(brwav.loop_start if brwav.is_looped else 0),
+            "loopEnd": int(brwav.loop_end),
         }
 
     def get_wav_file_info(self, wav_path: str) -> dict:
@@ -6531,12 +6542,7 @@ class PysarApi:
 
     def replace_sound_sample_from_wav_path(self, sound_id: int, wav_no: int, wav_path: str) -> dict:
         try:
-            from pysar.core.format.rwav import Brwav
-
-            wav_file = Path(str(wav_path)).expanduser()
-            if not wav_file.is_file():
-                return {"ok": False, "error": f"WAV file not found: {wav_path}"}
-            brwav = Brwav.from_wav(str(wav_file))
+            brwav = self._replacement_brwav_from_path(wav_path, encoding="ADPCM")
 
             archive = self.project_service.require_archive(self.session)
             entry = archive.data.sound_entries[int(sound_id)]
@@ -6622,7 +6628,7 @@ class PysarApi:
             result = self._window.create_file_dialog(
                 dialog_type=FileDialog.OPEN,
                 allow_multiple=False,
-                file_types=("WAV files (*.wav)", "All files (*.*)"),
+                file_types=_SAMPLE_IMPORT_FILE_TYPES,
             )
             if not result:
                 return {"ok": False, "error": "Cancelled"}
@@ -7695,7 +7701,7 @@ class PysarApi:
             result = self._window.create_file_dialog(
                 dialog_type=FileDialog.OPEN,
                 allow_multiple=False,
-                file_types=("WAV files (*.wav)", "All files (*.*)"),
+                file_types=_SAMPLE_IMPORT_FILE_TYPES,
             )
             if not result:
                 return {"ok": False, "error": "Cancelled"}
@@ -7703,10 +7709,8 @@ class PysarApi:
             if not bool(inspect):
                 source = Path(str(wav_path)).expanduser()
                 return {"ok": True, "path": str(source), "name": source.name}
-            # Reading the RIFF header is enough for chooser metadata. Encoding
-            # the entire source as DSP-ADPCM here made a successful file pick
-            # look stuck; the real conversion belongs to the apply operation.
-            return {"ok": True, **self._brstm_source_wav_info(str(wav_path))}
+            # Inspect source metadata without encoding audio in the picker.
+            return {"ok": True, **self._wav_file_info(str(wav_path))}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -7734,14 +7738,14 @@ class PysarApi:
             volume: int = 90,
             brwsd_file_index: int | None = None,
             encoding: str = "ADPCM",
-            looped: bool = False,
+            looped: bool | None = None,
             loop_start: int = 0,
             loop_end: int | None = None,
     ) -> dict:
         try:
             wav_file = Path(str(wav_path)).expanduser()
             if not wav_file.is_file():
-                return {"ok": False, "error": f"WAV file not found: {wav_path}"}
+                return {"ok": False, "error": f"Audio sample not found: {wav_path}"}
 
             brwav = self._replacement_brwav_from_path(
                 str(wav_file), encoding or "ADPCM", looped, loop_start, loop_end,
@@ -7768,7 +7772,7 @@ class PysarApi:
             volume: int = 90,
             brwsd_file_index: int | None = None,
             encoding: str = "ADPCM",
-            looped: bool = False,
+            looped: bool | None = None,
             loop_start: int = 0,
             loop_end: int | None = None,
     ) -> dict:
@@ -7778,7 +7782,7 @@ class PysarApi:
             result = self._window.create_file_dialog(
                 dialog_type=FileDialog.OPEN,
                 allow_multiple=False,
-                file_types=("WAV files (*.wav)", "All files (*.*)"),
+                file_types=_SAMPLE_IMPORT_FILE_TYPES,
             )
             if not result:
                 return {"ok": False, "error": "Cancelled"}

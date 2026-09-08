@@ -393,6 +393,7 @@ function AddSoundDialog({ onClose, onDirtyChange, onDataRefresh, initialSoundTyp
   const [brwsdFileIndex, setBrwsdFileIndex] = useStateD(null);
   const [wavPath, setWavPath] = useStateD("");
   const [wavInfo, setWavInfo] = useStateD(null);
+  const nativeWaveSource = /\.(?:r|br)wav$/i.test(wavPath.trim());
   const [wavCodec, setWavCodec] = useStateD("ADPCM");
   const [wavLoopEnabled, setWavLoopEnabled] = useStateD(false);
   const [wavLoopStart, setWavLoopStart] = useStateD(0);
@@ -466,8 +467,7 @@ function AddSoundDialog({ onClose, onDirtyChange, onDataRefresh, initialSoundTyp
     setWavPickerBusy(true);
     setError(null);
     try {
-      // Only the RIFF header is inspected here; DSP encoding still happens
-      // after Add sound is pressed.
+      // Inspect source metadata here; WAV encoding happens after Add sound.
       const result = await window.pysar.call("choose_wav_file", true);
       if (!mountedRef.current || requestId !== wavPickerRequestRef.current) return;
       if (result?.ok && result.path) {
@@ -554,9 +554,9 @@ function AddSoundDialog({ onClose, onDirtyChange, onDataRefresh, initialSoundTyp
     try {
       let result;
       if (soundType === "WAVE") {
-        if (!wavPath.trim()) { setError("WAV path is required"); setBusy(false); return; }
+        if (!wavPath.trim()) { setError("WAV or RWAV path is required"); setBusy(false); return; }
         const sampleCount = Number(wavInfo?.samples || 0);
-        if (wavLoopEnabled && (
+        if (!nativeWaveSource && wavLoopEnabled && (
           wavLoopStart < 0
           || wavLoopEnd <= wavLoopStart
           || (sampleCount > 0 && wavLoopEnd > sampleCount)
@@ -573,7 +573,7 @@ function AddSoundDialog({ onClose, onDirtyChange, onDataRefresh, initialSoundTyp
           volume,
           brwsdFileIndex,
           wavCodec,
-          wavLoopEnabled,
+          nativeWaveSource ? null : wavLoopEnabled,
           wavLoopStart,
           wavLoopEnabled ? wavLoopEnd : null,
         );
@@ -693,9 +693,9 @@ function AddSoundDialog({ onClose, onDirtyChange, onDataRefresh, initialSoundTyp
 
         {soundType === "WAVE" && (
           <div className="dialog-field">
-            <label>WAV file</label>
+            <label>WAV or RWAV file</label>
             <div className="dialog-path-row">
-              <input value={wavPath} onChange={(e) => { setWavPath(e.target.value); setWavInfo(null); }} placeholder="Choose or enter a .wav file path" />
+              <input value={wavPath} onChange={(e) => { setWavPath(e.target.value); setWavInfo(null); }} placeholder="Choose or enter a .wav, .rwav, or .brwav file path" />
               <button className="tb-btn" onClick={browseWavPath} disabled={busy || wavPickerBusy}>
                 {wavPickerBusy ? "Choosing…" : "Browse"}
               </button>
@@ -708,7 +708,10 @@ function AddSoundDialog({ onClose, onDirtyChange, onDataRefresh, initialSoundTyp
           </div>
         )}
 
-        {soundType === "WAVE" && (
+        {soundType === "WAVE" && nativeWaveSource && (
+          <div className="dialog-hint">RWAV files keep their original encoding and loop settings.</div>
+        )}
+        {soundType === "WAVE" && !nativeWaveSource && (
           <>
             <div className="dialog-field">
               <label>RWAV encoding</label>
@@ -757,7 +760,7 @@ function AddSoundDialog({ onClose, onDirtyChange, onDataRefresh, initialSoundTyp
                 <option key={w.fileIndex} value={w.fileIndex}>{w.label}</option>
               ))}
             </select>
-            <span className="dialog-hint">The WAV will be added to this BRWSD + its paired BRWAR</span>
+            <span className="dialog-hint">The sample will be added to this BRWSD + its paired BRWAR</span>
           </div>
         )}
 
@@ -1048,7 +1051,7 @@ function ReplaceSoundDialog({ soundId, onClose, onDirtyChange, onDataRefresh, on
     try {
       const result = await window.pysar.call("choose_wav_file");
       if (!result?.ok) {
-        if (result?.error !== "Cancelled") setError(result?.error || "Could not choose WAV");
+        if (result?.error !== "Cancelled") setError(result?.error || "Could not choose audio sample");
         setBusy(false);
         return;
       }
@@ -1343,7 +1346,7 @@ function ReplaceSoundDialog({ soundId, onClose, onDirtyChange, onDataRefresh, on
         )}
         <div className="dialog-hint" style={{ marginBottom: 12 }}>
           {info.soundType === "WAVE"
-            ? 'This WAVE sound uses the samples below. Click "Replace" to swap a sample with a new .wav file.'
+            ? 'This WAVE sound uses the samples below. Click "Replace" to swap a sample with a .wav, .rwav, or .brwav file.'
             : 'This SEQ sound uses the following wave samples (via its bank instrument). Click "Replace" to swap a specific variation.'}
         </div>
 
