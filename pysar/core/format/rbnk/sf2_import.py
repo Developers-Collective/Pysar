@@ -281,12 +281,18 @@ def _resolve_generators(
     return resolved
 
 
-def _timecents_to_brbnk(value: int) -> int:
+def _timecents_to_brbnk_duration(value: int) -> int:
     if value <= -32768:
         return 0
     seconds = 2.0 ** (max(-12000, min(8000, value)) / 1200.0)
     scaled = math.log(max(0.001, seconds) / 0.001, 10000) * 127
     return max(0, min(127, int(round(scaled))))
+
+
+def _timecents_to_brbnk_rate(value: int) -> int:
+    if value <= -32768:
+        return 127
+    return 127 - _timecents_to_brbnk_duration(value)
 
 
 def _attenuation_to_volume(centibels: int) -> int:
@@ -353,11 +359,11 @@ def _zone_from_generators(generators: dict[int, int], warnings: list[str]) -> _Z
         volume=_attenuation_to_volume(attenuation),
         pan=max(0, min(127, int(round(64 + pan * 64 / 500)))),
         pitch=max(1 / 16, min(16.0, 2.0 ** (cents / 1200.0))),
-        attack=_timecents_to_brbnk(generators[SF2Gen.ATTACK_VOL_ENV]),
-        decay=_timecents_to_brbnk(generators[SF2Gen.DECAY_VOL_ENV]),
+        attack=_timecents_to_brbnk_rate(generators[SF2Gen.ATTACK_VOL_ENV]),
+        decay=_timecents_to_brbnk_rate(generators[SF2Gen.DECAY_VOL_ENV]),
         sustain=_attenuation_to_volume(generators[SF2Gen.SUSTAIN_VOL_ENV]),
-        release=_timecents_to_brbnk(generators[SF2Gen.RELEASE_VOL_ENV]),
-        hold=_timecents_to_brbnk(generators[SF2Gen.HOLD_VOL_ENV]),
+        release=_timecents_to_brbnk_rate(generators[SF2Gen.RELEASE_VOL_ENV]),
+        hold=_timecents_to_brbnk_duration(generators[SF2Gen.HOLD_VOL_ENV]),
         looped=loop_mode == 1,
     )
 

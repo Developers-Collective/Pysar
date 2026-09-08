@@ -39,7 +39,9 @@ class _StringTrieNode:
         string_idx = self.string_idx()
         string_idx = -1 if string_idx is None else string_idx
 
-        return struct.pack('>hhiiii', self.is_leaf, self.bit, self.left, self.right, string_idx,
+        serialized_bit = self.bit if self.is_leaf else self.char_index * 8 + self.bit
+
+        return struct.pack('>hhiiii', self.is_leaf, serialized_bit, self.left, self.right, string_idx,
                            info_idx)
 
     def __hash__(self):

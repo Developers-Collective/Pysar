@@ -96,6 +96,16 @@ class WaveInfo:
             return self.nibble_to_samples(self.n_samples) + 1
         return self.n_samples
 
+    def set_n_samples_actual(self, sample_count: int) -> None:
+        sample_count = max(0, int(sample_count))
+        if self.encoding == AudioCodec.ADPCM:
+            self.n_samples = (
+                self.sample_to_nibble(sample_count - 1)
+                if sample_count > 0 else 0
+            )
+        else:
+            self.n_samples = sample_count
+
     def __str__(self) -> str:
         loop_info = f", loop_start={self.get_loop_start_samples()}" if self.is_looped else ""
         return (

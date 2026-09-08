@@ -59,7 +59,11 @@ def pre_decode_wave_payloads(brwar, wave_indices: set[int] | None = None) -> Non
             pcm = pcm.reshape(-1, brwav.n_channels).mean(axis=1).astype(np.int16)
         samples = np.asarray(pcm, dtype=np.float32) / 32768.0
         loop_start = int(brwav.loop_start) if brwav.is_looped else 0
-        loop_end = int(brwav.n_samples)
+        loop_end = (
+            int(getattr(brwav, "loop_end", brwav.n_samples))
+            if brwav.is_looped
+            else int(brwav.n_samples)
+        )
         payload = (samples, int(brwav.sample_rate), bool(brwav.is_looped), loop_start, loop_end)
         with _WAVE_PAYLOAD_CACHE_LOCK:
             _WAVE_PAYLOAD_CACHE.setdefault(cache_key, payload)
@@ -112,7 +116,11 @@ class BankWaveResolver:
             sample_count=sample_count,
             is_looped=bool(brwav.is_looped),
             loop_start=int(brwav.loop_start) if brwav.is_looped else 0,
-            loop_end=sample_count,
+            loop_end=(
+                int(getattr(brwav, "loop_end", sample_count))
+                if brwav.is_looped
+                else sample_count
+            ),
         )
 
     def _get_wave_payload(self, wave_index: int) -> tuple[np.ndarray, int, bool, int, int] | None:
@@ -136,7 +144,11 @@ class BankWaveResolver:
             # Normalize signed 16-bit PCM into the renderer's -1.0..1.0 float range.
             samples = np.asarray(pcm, dtype=np.float32) / 32768.0
             loop_start = int(brwav.loop_start) if brwav.is_looped else 0
-            loop_end = int(brwav.n_samples)
+            loop_end = (
+                int(getattr(brwav, "loop_end", brwav.n_samples))
+                if brwav.is_looped
+                else int(brwav.n_samples)
+            )
             payload = (samples, int(brwav.sample_rate), bool(brwav.is_looped), loop_start, loop_end)
             _WAVE_PAYLOAD_CACHE[cache_key] = payload
         self._cache[wave_index] = payload

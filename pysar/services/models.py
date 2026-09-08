@@ -120,6 +120,7 @@ class WaveListItem:
     n_channels: int
     n_samples: int           # number of decoded samples
     loop_start: int          # in samples
+    loop_end: int            # exclusive, in samples
     is_looped: bool
     size_bytes: int
     duration_ms: int

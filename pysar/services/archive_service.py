@@ -211,6 +211,7 @@ class ArchiveService:
                     n_channels=int(wi.n_channels),
                     n_samples=n_samples,
                     loop_start=loop_start,
+                    loop_end=n_samples,
                     is_looped=bool(wi.is_looped),
                     size_bytes=int(entry.original_size or 0),
                     duration_ms=duration_ms,

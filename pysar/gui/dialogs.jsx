@@ -392,6 +392,11 @@ function AddSoundDialog({ onClose, onDirtyChange, onDataRefresh, initialSoundTyp
   const [brwsdList, setBrwsdList] = useStateD([]);
   const [brwsdFileIndex, setBrwsdFileIndex] = useStateD(null);
   const [wavPath, setWavPath] = useStateD("");
+  const [wavInfo, setWavInfo] = useStateD(null);
+  const [wavCodec, setWavCodec] = useStateD("ADPCM");
+  const [wavLoopEnabled, setWavLoopEnabled] = useStateD(false);
+  const [wavLoopStart, setWavLoopStart] = useStateD(0);
+  const [wavLoopEnd, setWavLoopEnd] = useStateD(1);
   const [seqSources, setSeqSources] = useStateD([]);
   const [seqSource, setSeqSource] = useStateD("existing");
   const [seqFileIndex, setSeqFileIndex] = useStateD(null);
@@ -461,11 +466,16 @@ function AddSoundDialog({ onClose, onDirtyChange, onDataRefresh, initialSoundTyp
     setWavPickerBusy(true);
     setError(null);
     try {
-      // Adding a WAVE only needs the source path. Decoding it here used to
-      // make the picker appear to finish long before its result reached the UI.
-      const result = await window.pysar.call("choose_wav_file", false);
+      // Only the RIFF header is inspected here; DSP encoding still happens
+      // after Add sound is pressed.
+      const result = await window.pysar.call("choose_wav_file", true);
       if (!mountedRef.current || requestId !== wavPickerRequestRef.current) return;
-      if (result?.ok && result.path) setWavPath(result.path);
+      if (result?.ok && result.path) {
+        setWavPath(result.path);
+        setWavInfo(result);
+        setWavLoopStart(0);
+        setWavLoopEnd(Math.max(1, Number(result.samples) || 1));
+      }
       else if (result?.error && result.error !== "Cancelled") setError(result.error);
     } catch (ex) {
       if (mountedRef.current && requestId === wavPickerRequestRef.current) setError(String(ex));
@@ -545,7 +555,28 @@ function AddSoundDialog({ onClose, onDirtyChange, onDataRefresh, initialSoundTyp
       let result;
       if (soundType === "WAVE") {
         if (!wavPath.trim()) { setError("WAV path is required"); setBusy(false); return; }
-        result = await window.pysar.call("add_wave_sound_from_wav_path", name.trim(), wavPath.trim(), playerIndex, volume, brwsdFileIndex);
+        const sampleCount = Number(wavInfo?.samples || 0);
+        if (wavLoopEnabled && (
+          wavLoopStart < 0
+          || wavLoopEnd <= wavLoopStart
+          || (sampleCount > 0 && wavLoopEnd > sampleCount)
+        )) {
+          setError(`Loop points must satisfy 0 ≤ start < end${sampleCount > 0 ? ` ≤ ${sampleCount}` : ""}`);
+          setBusy(false);
+          return;
+        }
+        result = await window.pysar.call(
+          "add_wave_sound_from_wav_path",
+          name.trim(),
+          wavPath.trim(),
+          playerIndex,
+          volume,
+          brwsdFileIndex,
+          wavCodec,
+          wavLoopEnabled,
+          wavLoopStart,
+          wavLoopEnabled ? wavLoopEnd : null,
+        );
       } else if (soundType === "SEQ") {
         if ((D.banks || []).length === 0) { setError("A BRBNK is required for sequence playback"); setBusy(false); return; }
         if (seqSource === "existing" && seqFileIndex == null) { setError("Choose an existing BRSEQ"); setBusy(false); return; }
@@ -623,7 +654,7 @@ function AddSoundDialog({ onClose, onDirtyChange, onDataRefresh, initialSoundTyp
   }
 
   return (
-    <ModalOverlay title="Add Sound" onClose={onClose} width={soundType === "SEQ" ? 620 : (soundType === "STRM" && strmSource === "create" ? 580 : 480)}>
+    <ModalOverlay title="Add Sound" onClose={onClose} width={soundType === "SEQ" ? 620 : (soundType === "STRM" && strmSource === "create" ? 580 : (soundType === "WAVE" ? 540 : 480))}>
       <div className="dialog-form">
         <div className="dialog-field">
           <label>Sound type</label>
@@ -664,13 +695,58 @@ function AddSoundDialog({ onClose, onDirtyChange, onDataRefresh, initialSoundTyp
           <div className="dialog-field">
             <label>WAV file</label>
             <div className="dialog-path-row">
-              <input value={wavPath} onChange={(e) => setWavPath(e.target.value)} placeholder="Choose or enter a .wav file path" />
+              <input value={wavPath} onChange={(e) => { setWavPath(e.target.value); setWavInfo(null); }} placeholder="Choose or enter a .wav file path" />
               <button className="tb-btn" onClick={browseWavPath} disabled={busy || wavPickerBusy}>
                 {wavPickerBusy ? "Choosing…" : "Browse"}
               </button>
             </div>
-            <span className="dialog-hint">Absolute and relative file paths are supported.</span>
+            <span className="dialog-hint">
+              {wavInfo
+                ? `${Number(wavInfo.sampleRate || 0).toLocaleString()} Hz · ${Number(wavInfo.samples || 0).toLocaleString()} samples`
+                : "Absolute and relative file paths are supported."}
+            </span>
           </div>
+        )}
+
+        {soundType === "WAVE" && (
+          <>
+            <div className="dialog-field">
+              <label>RWAV encoding</label>
+              <select value={wavCodec} onChange={(event) => setWavCodec(event.target.value)}>
+                <option value="ADPCM">ADPCM — compact Nintendo ADPCM</option>
+                <option value="PCM16">PCM16 — uncompressed 16-bit</option>
+                <option value="PCM8">PCM8 — uncompressed 8-bit</option>
+              </select>
+            </div>
+            <label className="dialog-checkbox">
+              <input type="checkbox" checked={wavLoopEnabled} onChange={(event) => setWavLoopEnabled(event.target.checked)} />
+              <span>Enable native sample loop</span>
+            </label>
+            {wavLoopEnabled && (
+              <div className="dialog-row">
+                <div className="dialog-field" style={{ flex: 1 }}>
+                  <label>Loop start (sample)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={Math.max(0, Number(wavInfo?.samples || wavLoopEnd) - 1)}
+                    value={wavLoopStart}
+                    onChange={(event) => setWavLoopStart(Math.max(0, Number(event.target.value) || 0))}
+                  />
+                </div>
+                <div className="dialog-field" style={{ flex: 1 }}>
+                  <label>Loop end (sample, exclusive)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={Number(wavInfo?.samples || 0) || undefined}
+                    value={wavLoopEnd}
+                    onChange={(event) => setWavLoopEnd(Math.max(1, Number(event.target.value) || 1))}
+                  />
+                </div>
+              </div>
+            )}
+          </>
         )}
 
         {soundType === "WAVE" && brwsdList.length > 0 && (
@@ -1324,12 +1400,18 @@ function ChooseRwavEncodingDialog({ target, onClose, onReplace }) {
   const [codec, setCodec] = useStateD(rawBrwav ? (target?.encoding || "ADPCM") : "");
   const [looped, setLooped] = useStateD(!!target?.looped);
   const [loopStart, setLoopStart] = useStateD(Number(target?.loopStart || 0));
+  const [loopEnd, setLoopEnd] = useStateD(Number(target?.loopEnd || target?.samples || 0));
   const filename = String(target?.path || "").split(/[\\/]/).pop() || "selected WAV";
   const isWaveSound = target?.kind === "sound";
   const isAdd = target?.operation === "add";
   const supportsLoop = true;
   const sampleCount = Math.max(0, Number(target?.samples || 0));
-  const loopValid = !looped || (sampleCount > 0 && loopStart >= 0 && loopStart < sampleCount);
+  const loopValid = !looped || (
+    sampleCount > 0
+    && loopStart >= 0
+    && loopStart < loopEnd
+    && loopEnd <= sampleCount
+  );
   const targetName = isWaveSound
     ? (target?.soundName || "this WAVE sound")
     : (target?.archiveName || `WAR_${Number(target?.archiveId || 0).toString().padStart(4, "0")}`);
@@ -1357,17 +1439,31 @@ function ChooseRwavEncodingDialog({ target, onClose, onReplace }) {
               <label>Loop sample</label>
               <input type="checkbox" checked={looped} onChange={(event) => setLooped(event.target.checked)} />
             </div>
-            <div className="dialog-field">
-              <label>Loop start sample</label>
-              <input
-                className="mono"
-                type="number"
-                min="0"
-                max={Math.max(0, sampleCount - 1)}
-                value={loopStart}
-                disabled={!looped}
-                onChange={(event) => setLoopStart(Number(event.target.value))}
-              />
+            <div className="dialog-row">
+              <div className="dialog-field" style={{ flex: 1 }}>
+                <label>Loop start sample</label>
+                <input
+                  className="mono"
+                  type="number"
+                  min="0"
+                  max={Math.max(0, loopEnd - 1)}
+                  value={loopStart}
+                  disabled={!looped}
+                  onChange={(event) => setLoopStart(Number(event.target.value))}
+                />
+              </div>
+              <div className="dialog-field" style={{ flex: 1 }}>
+                <label>Loop end sample (exclusive)</label>
+                <input
+                  className="mono"
+                  type="number"
+                  min="1"
+                  max={sampleCount}
+                  value={loopEnd}
+                  disabled={!looped}
+                  onChange={(event) => setLoopEnd(Number(event.target.value))}
+                />
+              </div>
             </div>
           </>
         )}
@@ -1380,7 +1476,7 @@ function ChooseRwavEncodingDialog({ target, onClose, onReplace }) {
           <button className="tb-btn" onClick={onClose}>Cancel</button>
           <button
             className="tb-btn primary"
-            onClick={() => onReplace(rawBrwav ? null : codec, looped, loopStart)}
+            onClick={() => onReplace(rawBrwav ? null : codec, looped, loopStart, loopEnd)}
             disabled={(!rawBrwav && !codec) || !loopValid}
           >{isAdd ? "Add" : "Replace"}</button>
         </div>
@@ -1400,6 +1496,208 @@ function UnsavedDialog({ onSave, onDiscard, onCancel, busy = false, message = nu
           <button className="tb-btn" onClick={onDiscard} disabled={busy}>{discardLabel}</button>
           <button className="tb-btn" onClick={onCancel} disabled={busy}>Cancel</button>
           <button className="tb-btn primary" onClick={onSave} disabled={busy}>{busy ? "Saving…" : saveLabel}</button>
+        </div>
+      </div>
+    </ModalOverlay>
+  );
+}
+
+function BatchExportDialog({ sounds = [], initialSoundIds = [], onClose, onStart }) {
+  const [query, setQuery] = useStateD("");
+  const [type, setType] = useStateD("ALL");
+  const [selected, setSelected] = useStateD(() => new Set(initialSoundIds.map(Number)));
+  const [scrollTop, setScrollTop] = useStateD(0);
+  const listRef = useRefD(null);
+  const selectionAnchorRef = useRefD(null);
+  const filtered = React.useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return sounds.filter((sound) => (
+      (type === "ALL" || sound.type === type)
+      && (!needle || String(sound.name || "").toLowerCase().includes(needle) || String(sound.id).includes(needle))
+    ));
+  }, [sounds, query, type]);
+
+  useEffectD(() => {
+    setScrollTop(0);
+    if (listRef.current) listRef.current.scrollTop = 0;
+    selectionAnchorRef.current = null;
+  }, [query, type]);
+
+  const rowHeight = 34;
+  const viewportHeight = 306;
+  const start = Math.max(0, Math.floor(scrollTop / rowHeight) - 3);
+  const end = Math.min(filtered.length, start + Math.ceil(viewportHeight / rowHeight) + 6);
+  const visible = filtered.slice(start, end);
+
+  function toggle(soundId, shiftKey = false) {
+    const anchorIndex = selectionAnchorRef.current === null
+      ? -1
+      : filtered.findIndex((sound) => Number(sound.id) === selectionAnchorRef.current);
+    const targetIndex = filtered.findIndex((sound) => Number(sound.id) === soundId);
+    const range = shiftKey && anchorIndex >= 0 && targetIndex >= 0
+      ? filtered.slice(Math.min(anchorIndex, targetIndex), Math.max(anchorIndex, targetIndex) + 1)
+      : null;
+    if (!range) selectionAnchorRef.current = soundId;
+    setSelected((current) => {
+      const next = new Set(current);
+      if (range) range.forEach((sound) => next.add(Number(sound.id)));
+      else if (next.has(soundId)) next.delete(soundId);
+      else next.add(soundId);
+      return next;
+    });
+  }
+
+  function selectShown() {
+    selectionAnchorRef.current = null;
+    setSelected((current) => {
+      const next = new Set(current);
+      filtered.forEach((sound) => next.add(Number(sound.id)));
+      return next;
+    });
+  }
+
+  return (
+    <ModalOverlay title="Batch Export" onClose={onClose} width={610}>
+      <div className="dialog-form">
+        <div className="dialog-hint">
+          Select sounds to render as WAV. Every selectable SEQ variation is written as a separate WAV file.
+        </div>
+        <div className="batch-export-toolbar">
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search sounds by name or ID…"
+            aria-label="Search sounds"
+          />
+          <div className="batch-export-types">
+            {["ALL", "STRM", "WAVE", "SEQ"].map((value) => (
+              <button key={value} className={type === value ? "on" : ""} onClick={() => setType(value)}>
+                {value === "ALL" ? "All" : value}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="batch-export-selection-actions">
+          <span>{selected.size.toLocaleString()} selected</span>
+          <div>
+            <button className="tb-btn" onClick={selectShown} disabled={!filtered.length}>Select shown</button>
+            <button className="tb-btn" onClick={() => {
+              selectionAnchorRef.current = null;
+              setSelected(new Set());
+            }} disabled={!selected.size}>Clear</button>
+          </div>
+        </div>
+        <div
+          className="batch-export-list"
+          ref={listRef}
+          onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+          style={{ height: viewportHeight }}
+        >
+          {filtered.length ? (
+            <div className="batch-export-list-space" style={{ height: filtered.length * rowHeight }}>
+              {visible.map((sound, index) => (
+                <div
+                  className={`batch-export-row${selected.has(Number(sound.id)) ? " selected" : ""}`}
+                  key={sound.id}
+                  style={{ top: (start + index) * rowHeight, height: rowHeight }}
+                  onClick={(event) => toggle(Number(sound.id), event.shiftKey)}
+                >
+                  <input
+                    type="checkbox"
+                    aria-label={`Select sound ${sound.id}: ${sound.name}`}
+                    checked={selected.has(Number(sound.id))}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={(event) => toggle(Number(sound.id), event.nativeEvent.shiftKey)}
+                  />
+                  <span className="batch-export-id mono">{sound.id}</span>
+                  <span className="batch-export-name">{sound.name}</span>
+                  <span className={`type-pill type-${sound.type}`}>{sound.type}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="batch-export-empty">No matching sounds</div>
+          )}
+        </div>
+        <div className="dialog-hint">
+          Click a row to toggle it, or Shift-click to select a range. Pysar will ask for a parent folder and create a new batch-export folder inside it.
+        </div>
+        <div className="dialog-actions">
+          <button className="tb-btn" onClick={onClose}>Cancel</button>
+          <button
+            className="tb-btn primary"
+            disabled={!selected.size}
+            onClick={() => onStart([...selected].sort((a, b) => a - b))}
+          >Export {selected.size ? selected.size.toLocaleString() : "selected"}…</button>
+        </div>
+      </div>
+    </ModalOverlay>
+  );
+}
+
+function BatchExportStatusDialog({
+  busy = false,
+  aborting = false,
+  cancelled = false,
+  path = null,
+  error = null,
+  summary = null,
+  partial = false,
+  progress = null,
+  onClose = () => {},
+  onAbort = () => {},
+}) {
+  const completed = Math.max(0, Number(progress?.completed || 0));
+  const total = Math.max(0, Number(progress?.total || 0));
+  const percent = Math.max(0, Math.min(100, Number(progress?.percent || 0)));
+  const hasKnownTotal = total > 0;
+  return (
+    <ModalOverlay title="Batch Export" onClose={busy ? () => {} : onClose} width={500}>
+      <div className="dialog-form">
+        {busy ? (
+          <div>
+            <strong>Exporting selected sounds…</strong>
+            <div className="dialog-hint" style={{ marginTop: 8 }}>
+              {aborting
+                ? "Stopping safely and removing the unfinished staging folder…"
+                : "Large sequences can take a moment. Keep Pysar open until this finishes."}
+            </div>
+            <div className="dump-progress">
+              <div
+                className={"dump-progress-track" + (hasKnownTotal ? "" : " indeterminate")}
+                role="progressbar"
+                aria-label="Batch export progress"
+                aria-valuemin="0"
+                aria-valuemax={hasKnownTotal ? total : undefined}
+                aria-valuenow={hasKnownTotal ? completed : undefined}
+              >
+                <div className="dump-progress-fill" style={hasKnownTotal ? { width: percent + "%" } : undefined} />
+              </div>
+              <div className="dump-progress-meta">
+                <span>{progress?.detail || "Preparing batch export…"}</span>
+                <span>{hasKnownTotal ? `${completed} / ${total} · ${percent}%` : "Preparing…"}</span>
+              </div>
+            </div>
+          </div>
+        ) : cancelled ? (
+          <div className="dialog-hint">Batch export cancelled. No output folder was created.</div>
+        ) : error ? (
+          <div className="dialog-error">{error}</div>
+        ) : (
+          <div className="dialog-success">
+            <strong>{partial ? "Batch export completed with issues" : "Batch export completed"}</strong>
+            {path && <code>{path}</code>}
+          </div>
+        )}
+        {!busy && summary && <div className="dialog-hint">{summary}</div>}
+        <div className="dialog-actions">
+          {busy ? (
+            <button className="tb-btn" onClick={onAbort} disabled={aborting}>
+              {aborting ? "Aborting…" : "Abort"}
+            </button>
+          ) : (
+            <button className="tb-btn primary" onClick={onClose}>Close</button>
+          )}
         </div>
       </div>
     </ModalOverlay>
@@ -1521,6 +1819,8 @@ Object.assign(window, {
   ReplaceSoundDialog,
   ChooseRwavEncodingDialog,
   UnsavedDialog,
+  BatchExportDialog,
+  BatchExportStatusDialog,
   DumpArchiveOptionsDialog,
   DumpArchiveStatusDialog,
 });

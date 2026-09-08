@@ -58,7 +58,7 @@ function getMediaPlayerTheme(item) {
   return MEDIA_PLAYER_THEMES[item.type] || MEDIA_PLAYER_THEMES.DEFAULT;
 }
 
-function MediaPlayerBar({ playingSound, playingId, isPlaying, durationMs, volume, strmPlayback, seqPlayback, autoPlayEnabled, seqVariations, onPlay, onPause, onStop, onSeek, onNext, onVolume, onStrmLoopChange, onSeqLoopChange, onAutoPlayChange, onStrmTrackSelectionChange, onSeqVariationChange }) {
+function MediaPlayerBar({ playingSound, playingId, isPlaying, durationMs, volume, strmPlayback, seqPlayback, wavePlayback, autoPlayEnabled, seqVariations, onPlay, onPause, onStop, onSeek, onNext, onVolume, onStrmLoopChange, onSeqLoopChange, onWaveLoopChange, onAutoPlayChange, onStrmTrackSelectionChange, onSeqVariationChange }) {
   const [playheadMs, setLivePlayheadMs] = useStateT(() => window.PysarPlayheadStore.getSnapshot());
   const [volumeOpen, setVolumeOpen] = useStateT(false);
   const [scrubMs, setScrubMs] = useStateT(null);
@@ -70,6 +70,7 @@ function MediaPlayerBar({ playingSound, playingId, isPlaying, durationMs, volume
   const playbackIcon = pysarIconForPlayback(playingSound);
   const isStrmTransport = playingSound?.type === "STRM";
   const isSeqTransport = playingSound?.type === "SEQ";
+  const isWaveTransport = playingSound?.type === "WAVE";
   const isSoundTransport = window.PysarIsSoundListTransport(playingSound);
   const strmTracks = Array.isArray(strmPlayback?.tracks) ? strmPlayback.tracks : [];
   const selectedTrackIndices = Array.isArray(strmPlayback?.selectedTrackIndices) ? strmPlayback.selectedTrackIndices : [];
@@ -187,6 +188,17 @@ function MediaPlayerBar({ playingSound, playingId, isPlaying, durationMs, volume
                         checked={!!seqPlayback?.loopEnabled}
                         disabled={!seqPlayback?.looped}
                         onChange={(event) => onSeqLoopChange?.(event.target.checked)}
+                      />
+                      <span>Loop</span>
+                    </label>
+                  )}
+                  {isWaveTransport && (
+                    <label className={"tp-loop" + (wavePlayback?.looped ? "" : " unavailable")} title={wavePlayback?.looped ? "Loop this WAVE sound at its embedded BRWAV loop points" : "This WAVE sound has no embedded sample loop"}>
+                      <input
+                        type="checkbox"
+                        checked={!!wavePlayback?.loopEnabled}
+                        disabled={!wavePlayback?.looped}
+                        onChange={(event) => onWaveLoopChange?.(event.target.checked)}
                       />
                       <span>Loop</span>
                     </label>

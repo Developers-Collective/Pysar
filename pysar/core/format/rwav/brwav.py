@@ -167,22 +167,23 @@ class Brwav(EditorBase):
         """
         n_samples = len(pcm_samples)
 
-        # Determine actual total samples (this is the loop end point)
-        if loop_end <= 0 or loop_end > n_samples:
-            total_samples = n_samples
-        else:
-            total_samples = loop_end
-
-        # Truncate PCM data to total_samples
-        pcm_samples = pcm_samples[:total_samples]
-
-        # Determine if looping is enabled
         is_looped = loop_start >= 0
+        if is_looped:
+            total_samples = n_samples if loop_end <= 0 else int(loop_end)
+            if total_samples <= 0 or total_samples > n_samples:
+                raise ValueError(
+                    f"Loop end must be between 1 and {max(0, n_samples)}"
+                )
+            if loop_start >= total_samples:
+                raise ValueError(
+                    f"Loop start must be between 0 and {max(0, total_samples - 1)}"
+                )
+        else:
+            total_samples = n_samples
 
-        # Validate loop_start
-        if loop_start >= total_samples:
-            loop_start = -1
-            is_looped = False
+        # BRWAV has no separate playable-end field beyond loopEnd. Samples
+        # after an authored loop end are therefore not part of the encoded wave.
+        pcm_samples = pcm_samples[:total_samples]
 
         sample_data, wave_info = cls._encode_samples(
             pcm_samples,
@@ -240,14 +241,29 @@ class Brwav(EditorBase):
         """Loop start sample."""
         return self._data.wave_info.get_loop_start_samples()
 
-    def set_loop(self, looped: bool, loop_start: int = 0) -> None:
-        """Update loop metadata, including the ADPCM decoder loop context."""
+    @property
+    def loop_end(self) -> int:
+        """Exclusive loop end sample (the sample after the last one played)."""
+        return self.n_samples
+
+    def set_loop(
+            self,
+            looped: bool,
+            loop_start: int = 0,
+            loop_end: int | None = None,
+    ) -> None:
         info = self._data.wave_info
         enabled = bool(looped)
         start = max(0, int(loop_start))
-        if enabled and (self.n_samples <= 0 or start >= self.n_samples):
+        current_end = self.n_samples
+        end = current_end if loop_end is None else int(loop_end)
+        if enabled and (end <= 0 or end > current_end):
             raise ValueError(
-                f"Loop start must be between 0 and {max(0, self.n_samples - 1)}"
+                f"Loop end must be between 1 and {max(0, current_end)}"
+            )
+        if enabled and start >= end:
+            raise ValueError(
+                f"Loop start must be between 0 and {max(0, end - 1)}"
             )
         info.is_looped = enabled
         info.loop_start = (
@@ -255,6 +271,8 @@ class Brwav(EditorBase):
             if info.encoding == AudioCodec.ADPCM
             else start
         ) if enabled else 0
+        if enabled:
+            info.set_n_samples_actual(end)
 
         if info.encoding == AudioCodec.ADPCM:
             for channel_index, params in enumerate(info.adpcm_params):
@@ -282,6 +300,8 @@ class Brwav(EditorBase):
         # Untouched BRWAVs may preserve their original raw blob. Metadata edits
         # must force the writer to rebuild it.
         self._data.raw_bytes = None
+        self._decoded_pcm = None
+        self._decoded_channels = None
         self.mark_dirty(DirtyFlags.ALL)
 
     @property

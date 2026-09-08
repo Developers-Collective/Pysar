@@ -1,4 +1,97 @@
-function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDeleteSound, onRenameBank, onReplaceBank, onExportBank, onDeleteBank, onUpdateGroup, onUpdatePlayer, onRenamePlayer, onDeletePlayer, onDeleteGroup, onDeleteArchive, onReplaceSound, onExportSound, onReplaceWave, onExportWave, onDeleteWave, onUpdateWave }) {
+function WaveSoundLoopFields({ sound, onUpdate }) {
+  const safeMode = !!window.PYSAR_DATA?.archive?.safeMode;
+  const [details, setDetails] = React.useState(null);
+  const [error, setError] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setDetails(null);
+    setError(null);
+    window.pysar.call("get_wave_sound_loop", sound.id)
+      .then((result) => {
+        if (cancelled) return;
+        if (result?.ok) setDetails(result.loop);
+        else setError(result?.error || "Could not resolve this sound's WAV loop");
+      })
+      .catch((reason) => {
+        if (!cancelled) setError(String(reason));
+      });
+    return () => { cancelled = true; };
+  }, [sound.id, safeMode]);
+
+  async function apply(patch) {
+    if (!onUpdate || !details || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await onUpdate(sound.id, patch);
+      if (result?.ok) setDetails(result.loop);
+      else setError(result?.error || "Could not update this sound's WAV loop");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (error) return <div className="dialog-error">{error}</div>;
+  if (!details) return <div className="routing-shared-note">Loading WAV loop points…</div>;
+
+  const disabled = busy || !!details.protected;
+  const loopEnd = Number(details.loopEnd || details.samples || 0);
+  const loopStart = Number(details.loopStart || 0);
+  return (
+    <>
+      <Field label="Looped">
+        <input
+          type="checkbox"
+          checked={!!details.looped}
+          disabled={disabled}
+          onChange={(event) => apply({
+            looped: event.target.checked,
+            loopStart,
+            loopEnd,
+          })}
+        />
+      </Field>
+      <Field label="Loop start">
+        <NumberInput
+          key={`wave-sound-loop-start:${loopStart}`}
+          value={loopStart}
+          min={0}
+          max={Math.max(0, loopEnd - 1)}
+          disabled={disabled || !details.looped}
+          onChange={(value) => apply({
+            looped: true,
+            loopStart: value,
+            loopEnd,
+          })}
+        />
+      </Field>
+      <Field label="Loop end">
+        <NumberInput
+          key={`wave-sound-loop-end:${loopEnd}`}
+          value={loopEnd}
+          min={Math.max(1, loopStart + 1)}
+          max={Math.max(1, Number(details.samples || 1))}
+          disabled={disabled || !details.looped}
+          onChange={(value) => apply({
+            looped: true,
+            loopStart,
+            loopEnd: value,
+          })}
+        />
+      </Field>
+      <div className="routing-shared-note">
+        Sample positions are inclusive at the start and exclusive at the end.
+        {details.protected ? " Turn off Safe Mode to edit this original sound." : ""}
+      </div>
+    </>
+  );
+}
+
+function PropertiesTab({ item, onNavigate, onUpdateSound, onUpdateSoundLoop, onRenameSound, onDeleteSound, onRenameBank, onReplaceBank, onExportBank, onDeleteBank, onUpdateGroup, onUpdatePlayer, onRenamePlayer, onDeletePlayer, onDeleteGroup, onDeleteArchive, onReplaceSound, onExportSound, onReplaceWave, onExportWave, onDeleteWave, onUpdateWave }) {
   const D = window.PYSAR_DATA;
   // SOUND properties
   if (item.kind === "sound") {
@@ -36,6 +129,11 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDelet
         <CollapsibleSection title="Pitch" defaultOpen={false}>
           <Field label="Pitch"><NumberInput value={s.pitch ?? 1} min={0.01} max={16} step={0.001} disabled /></Field>
         </CollapsibleSection>
+        {s.type === "WAVE" && (
+          <CollapsibleSection title="WAV Loop">
+            <WaveSoundLoopFields sound={s} onUpdate={onUpdateSoundLoop} />
+          </CollapsibleSection>
+        )}
         <CollapsibleSection title="File" defaultOpen={false}>
           <Field label="File index"><ReadOnly value={s.file} /></Field>
           <Field label="Data file"><RefSelect value={s.dataFileId} options={D.files || []} disabled empty="No data file" onNavigate={onNavigate} referenceKind="file" /></Field>
@@ -257,7 +355,11 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDelet
               onChange={(event) => onUpdateWave?.(
                 w.archiveId,
                 w.index ?? w.waveIndex,
-                { looped: event.target.checked, loopStart: Number(w.loopStart || 0) },
+                {
+                  looped: event.target.checked,
+                  loopStart: Number(w.loopStart || 0),
+                  loopEnd: Number(w.loopEnd || w.samples || 0),
+                },
               )}
             />
           </Field>
@@ -265,15 +367,37 @@ function PropertiesTab({ item, onNavigate, onUpdateSound, onRenameSound, onDelet
             <NumberInput
               value={w.loopStart ?? 0}
               min={0}
-              max={Math.max(0, Number(w.samples || 1) - 1)}
+              max={Math.max(0, Number(w.loopEnd || w.samples || 1) - 1)}
               disabled={!!w.protected || !w.looped}
               onChange={(value) => onUpdateWave?.(
                 w.archiveId,
                 w.index ?? w.waveIndex,
-                { looped: true, loopStart: value },
+                {
+                  looped: true,
+                  loopStart: value,
+                  loopEnd: Number(w.loopEnd || w.samples || 0),
+                },
               )}
             />
           </Field>
+          <Field label="Loop end">
+            <NumberInput
+              value={w.loopEnd ?? w.samples ?? 0}
+              min={Math.max(1, Number(w.loopStart || 0) + 1)}
+              max={Math.max(1, Number(w.samples || 1))}
+              disabled={!!w.protected || !w.looped}
+              onChange={(value) => onUpdateWave?.(
+                w.archiveId,
+                w.index ?? w.waveIndex,
+                {
+                  looped: true,
+                  loopStart: Number(w.loopStart || 0),
+                  loopEnd: value,
+                },
+              )}
+            />
+          </Field>
+          <div className="routing-shared-note">Loop end is exclusive: it points to the sample immediately after the loop.</div>
         </CollapsibleSection>
         <CollapsibleSection title="Storage" defaultOpen={false}>
           <Field label="Archive ID"><ReadOnly value={w.archiveId} /></Field>

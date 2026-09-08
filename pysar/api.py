@@ -29,7 +29,8 @@ from pysar.services import (
 )
 from pysar.seq.archive import make_playback_context
 from pysar.seq.renderer import SequenceRenderer
-from pysar.seq.resolver import clear_wave_payload_cache, midi_ratio
+from pysar.seq.resolver import BankWaveResolver, clear_wave_payload_cache, midi_ratio
+from pysar.seq.runtime import INVALID_ENVELOPE
 from pysar.seq.types import PlaybackContext
 
 
@@ -179,7 +180,7 @@ class PysarApi:
             return event
 
     def abort_dump(self) -> dict:
-        """Request cancellation without waiting behind the long-running dump."""
+        """Cancel the active archive dump or batch export without blocking."""
         cancel_event = self._ensure_dump_cancellation_state()
         with self._dump_lock:
             active = bool(self._dump_in_progress and not self._dump_commit_complete)
@@ -503,6 +504,16 @@ class PysarApi:
         suffix = 2
         while candidate.exists():
             candidate = parent / f"{stem}_dump_{suffix}"
+            suffix += 1
+        return candidate
+
+    @staticmethod
+    def _next_batch_export_destination(parent: Path, stem: str) -> Path:
+        """Return a non-existing selected-sound export directory below *parent*."""
+        candidate = parent / f"{stem}_batch_export"
+        suffix = 2
+        while candidate.exists():
+            candidate = parent / f"{stem}_batch_export_{suffix}"
             suffix += 1
         return candidate
 
@@ -997,6 +1008,211 @@ class PysarApi:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    def batch_export_sounds_to_path(self, output_dir: str, sound_ids: list[int]) -> dict:
+        """Render selected sounds to WAV in one cancellable, atomic operation."""
+        cancel_event = self._ensure_dump_cancellation_state()
+        with self._dump_lock:
+            if self._dump_in_progress:
+                return {"ok": False, "error": "Another archive export is already in progress"}
+            cancel_event.clear()
+            self._dump_in_progress = True
+            self._dump_commit_complete = False
+
+        staging: Path | None = None
+        try:
+            def check_cancelled() -> None:
+                if cancel_event.is_set():
+                    raise ArchiveDumpCancelled("Batch export cancelled")
+
+            archive = self.project_service.require_archive(self.session)
+            selected_ids = sorted({int(sound_id) for sound_id in (sound_ids or [])})
+            if not selected_ids:
+                raise ValueError("Select at least one sound to export")
+            invalid = [
+                sound_id for sound_id in selected_ids
+                if not 0 <= sound_id < len(archive.data.sound_entries)
+            ]
+            if invalid:
+                raise ValueError(f"Sound ID {invalid[0]} is out of range")
+
+            destination = Path(str(output_dir)).expanduser()
+            if not destination.name or destination.name in {".", ".."}:
+                raise ValueError("Choose a folder name for the batch export")
+            if destination.exists():
+                kind = "file" if destination.is_file() else "folder"
+                raise FileExistsError(f"The destination {kind} already exists: {destination}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            staging = destination.parent / (
+                f".{destination.name}.pysar-batch-{uuid.uuid4().hex}"
+            )
+            staging.mkdir(parents=False, exist_ok=False)
+
+            try:
+                self.push_event("batch_export_progress", {
+                    "completed": 0,
+                    "total": 0,
+                    "percent": 0,
+                    "detail": "Inspecting selected sequences…",
+                })
+            except Exception:
+                pass
+
+            work_units = 0
+            for sound_id in selected_ids:
+                check_cancelled()
+                entry = archive.data.sound_entries[sound_id]
+                if entry.sound_type == SoundType.SEQ:
+                    variation_count = 0
+                    try:
+                        variations = self._sequence_variations(sound_id).get("variations", [])
+                        variation_count = len(variations) if isinstance(variations, list) else 0
+                    except Exception:
+                        pass
+                    work_units += 1 + variation_count
+                else:
+                    work_units += 1
+            progress_total = max(1, work_units + 1)
+            progress_completed = 0
+
+            def report_progress(detail: str, completed: bool = False) -> None:
+                nonlocal progress_completed
+                if completed:
+                    progress_completed = min(progress_total, progress_completed + 1)
+                try:
+                    self.push_event("batch_export_progress", {
+                        "completed": progress_completed,
+                        "total": progress_total,
+                        "percent": int(round(progress_completed * 100 / progress_total)),
+                        "detail": detail,
+                    })
+                except Exception:
+                    pass
+
+            manifest: dict[str, Any] = {
+                "format": "Pysar selected-sound batch export",
+                "archive": (
+                    str(self.session.archive_path)
+                    if self.session.archive_path is not None else None
+                ),
+                "sounds": [],
+                "errors": [],
+            }
+            exported_count = 0
+            report_progress("Preparing selected sounds…")
+
+            for sound_id in selected_ids:
+                check_cancelled()
+                entry = archive.data.sound_entries[sound_id]
+                sound_name = self.archive_service._sound_name(archive, sound_id, entry)
+                safe_name = archive._sanitize_name(
+                    sound_name,
+                    fallback=f"SOUND_{sound_id:05d}",
+                )
+                output_path = staging / f"{sound_id:05d}_{safe_name}.wav"
+                written: list[Path] = []
+
+                def on_file_written(path: Path) -> None:
+                    nonlocal exported_count
+                    written.append(path)
+                    exported_count += 1
+                    report_progress(f"Exported {sound_name}: {path.name}", completed=True)
+
+                record: dict[str, Any] = {
+                    "id": sound_id,
+                    "name": sound_name,
+                    "type": entry.sound_type.name,
+                    "outputs": [],
+                }
+                report_progress(f"Exporting {sound_name}…")
+                try:
+                    result = self._export_sound_to_path(
+                        sound_id,
+                        output_path,
+                        on_file_written=on_file_written,
+                        cancel_callback=cancel_event.is_set,
+                    )
+                    check_cancelled()
+                    if not result.get("ok"):
+                        raise RuntimeError(result.get("error") or "Export failed")
+                except ArchiveDumpCancelled:
+                    raise
+                except Exception as exc:
+                    if not written:
+                        report_progress(f"Could not export {sound_name}", completed=True)
+                    error = {"soundId": sound_id, "name": sound_name, "message": str(exc)}
+                    manifest["errors"].append(error)
+                    record["error"] = str(exc)
+                record["outputs"] = [str(path.relative_to(staging)) for path in written]
+                manifest["sounds"].append(record)
+
+            check_cancelled()
+            report_progress("Finalising batch export…")
+            archive._write_json(staging / "batch_export.json", manifest)
+            with self._dump_lock:
+                check_cancelled()
+                staging.rename(destination)
+                staging = None
+                self._dump_commit_complete = True
+            progress_completed = progress_total
+            report_progress("Batch export complete")
+
+            error_count = len(manifest["errors"])
+            summary = (
+                f"{len(selected_ids)} sound{'s' if len(selected_ids) != 1 else ''} selected"
+                f" · {exported_count} WAV file{'s' if exported_count != 1 else ''}"
+            )
+            if error_count:
+                summary += f" · {error_count} issue{'s' if error_count != 1 else ''}"
+            return {
+                "ok": True,
+                "path": str(destination),
+                "soundCount": len(selected_ids),
+                "fileCount": exported_count,
+                "errorCount": error_count,
+                "partial": bool(error_count),
+                "errors": manifest["errors"],
+                "summary": summary,
+            }
+        except ArchiveDumpCancelled:
+            return {"ok": False, "cancelled": True, "error": "Batch export cancelled"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        finally:
+            if staging is not None and staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            with self._dump_lock:
+                self._dump_in_progress = False
+                self._dump_commit_complete = False
+                cancel_event.clear()
+
+    def batch_export_sounds_dialog(self, sound_ids: list[int]) -> dict:
+        """Choose a parent folder and export the selected sounds as WAV files."""
+        if self._window is None:
+            return {"ok": False, "error": "No window"}
+        try:
+            archive = self.project_service.require_archive(self.session)
+            if not sound_ids:
+                return {"ok": False, "error": "Select at least one sound to export"}
+            result = self._window.create_file_dialog(
+                dialog_type=FileDialog.FOLDER,
+                allow_multiple=False,
+            )
+            if not result:
+                return {"ok": False, "error": "Cancelled"}
+            selected = result[0] if isinstance(result, (list, tuple)) else result
+            parent = Path(str(selected)).expanduser()
+            if not parent.is_dir():
+                return {"ok": False, "error": f"Folder not found: {parent}"}
+            source_stem = (
+                self.session.archive_path.stem
+                if self.session.archive_path is not None else "archive"
+            )
+            safe_stem = archive._sanitize_name(source_stem, fallback="archive")
+            destination = self._next_batch_export_destination(parent, safe_stem)
+            return self.batch_export_sounds_to_path(str(destination), sound_ids)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def close_archive(
             self,
             document_id: str | None = None,
@@ -1178,6 +1394,7 @@ class PysarApi:
                     "channels": w.n_channels,
                     "samples": w.n_samples,
                     "loopStart": w.loop_start,
+                    "loopEnd": w.loop_end,
                     "looped": w.is_looped,
                     "sizeBytes": w.size_bytes,
                     "durationMs": w.duration_ms,
@@ -1415,6 +1632,10 @@ class PysarApi:
                 result = {"ok": True, "durationMs": effective_duration}
                 if seq_playback is not None:
                     result["seqPlayback"] = dict(seq_playback)
+                archive = self.project_service.require_archive(self.session)
+                wave_playback = self._wave_sound_playback_metadata(archive, int(sound_id))
+                if wave_playback is not None:
+                    result["wavePlayback"] = wave_playback
                 return result
             archive = self.project_service.require_archive(self.session)
             entry = self.archive_service._sound_entry(archive, int(sound_id))
@@ -1429,10 +1650,16 @@ class PysarApi:
             with self._duration_lock:
                 self._duration_cache[key] = duration_ms
             self._warm_sound_preview_async(int(sound_id), spec)
-            return {
+            result = {
                 "ok": True,
                 "durationMs": duration_ms,
             }
+            wave_playback = self._wave_sound_playback_metadata(
+                archive, int(sound_id), entry,
+            )
+            if wave_playback is not None:
+                result["wavePlayback"] = wave_playback
+            return result
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -1503,6 +1730,7 @@ class PysarApi:
             strm_context = None
             strm_playback = None
             strm_progressive = None
+            wave_playback = None
             if entry.sound_type == SoundType.STRM:
                 spec["strm_source_revision"] = int(getattr(self, "_strm_source_revision", 0))
                 sound_name = self.archive_service._sound_name(archive, int(sound_id), entry)
@@ -1517,6 +1745,10 @@ class PysarApi:
                     spec["sample_rate"] = max(1, int(brstm.sample_rate))
                     spec["total_frames"] = max(0, int(brstm.n_samples))
                     strm_playback = self._strm_playback_metadata(brstm)
+            elif entry.sound_type == SoundType.WAVE:
+                wave_playback = self._wave_sound_playback_metadata(
+                    archive, int(sound_id), entry,
+                )
             cache_key = self._duration_cache_key(int(sound_id), spec)
             if entry.sound_type == SoundType.SEQ:
                 with self._duration_lock:
@@ -1597,6 +1829,8 @@ class PysarApi:
                 result["seqPlayback"] = dict(seq_playback)
             if strm_playback is not None:
                 result["strmPlayback"] = strm_playback
+            if wave_playback is not None:
+                result["wavePlayback"] = wave_playback
             if strm_progressive is not None:
                 result["progressiveStrm"] = {
                     "startUrl": self._stream_url(strm_progressive["startToken"]),
@@ -1873,6 +2107,48 @@ class PysarApi:
             "loopStartMs": int(round(int(brstm.loop_start) * 1000 / sample_rate)),
             "tracks": tracks,
         }
+
+    @staticmethod
+    def _wave_playback_metadata(context: PlaybackContext) -> dict[str, Any] | None:
+        """Describe the native loop on the BRWAV used by a WAVE sound."""
+        if context.brwsd is None or context.brwar is None:
+            return None
+        wave_sound_index = int(context.extras.get("wave_sound_index", -1))
+        if not 0 <= wave_sound_index < len(context.brwsd):
+            return None
+        notes = context.brwsd[wave_sound_index].notes
+        if not notes:
+            return None
+        note = notes[0]
+        wave_index = int(note.wave_index)
+        if not 0 <= wave_index < len(context.brwar):
+            return None
+        brwav = context.brwar[wave_index]
+        sample_rate = max(1, int(brwav.sample_rate))
+        playback_ratio = max(1.0e-6, float(getattr(note, "pitch", 1.0) or 1.0))
+        loop_end = max(0, int(brwav.loop_end))
+        loop_start = max(0, min(loop_end, int(brwav.loop_start)))
+        return {
+            "looped": bool(brwav.is_looped and loop_start < loop_end),
+            "loopStartMs": int(round(loop_start * 1000 / sample_rate / playback_ratio)),
+            "loopEndMs": int(round(loop_end * 1000 / sample_rate / playback_ratio)),
+            "loopStartSample": loop_start,
+            "loopEndSample": loop_end,
+            "sampleRate": sample_rate,
+            "playbackRatio": playback_ratio,
+        }
+
+    def _wave_sound_playback_metadata(
+        self,
+        archive,
+        sound_id: int,
+        entry=None,
+    ) -> dict[str, Any] | None:
+        entry = entry or self.archive_service._sound_entry(archive, int(sound_id))
+        if entry.sound_type != SoundType.WAVE:
+            return None
+        sound_name = self.archive_service._sound_name(archive, int(sound_id), entry)
+        return self._wave_playback_metadata(self._get_or_create_context(archive, sound_name))
 
     def get_strm_playback_metadata(self, sound_id: int) -> dict:
         """Return the loop and track controls for a selected external BRSTM."""
@@ -2571,7 +2847,15 @@ class PysarApi:
                 if 0 <= wave_index < len(context.brwsd):
                     notes = context.brwsd[wave_index].notes
                     if notes and 0 <= int(notes[0].wave_index) < len(context.brwar):
-                        return int(round(float(context.brwar[int(notes[0].wave_index)].duration) * 1000)), None
+                        playback_ratio = max(
+                            1.0e-6,
+                            float(getattr(notes[0], "pitch", 1.0) or 1.0),
+                        )
+                        return int(round(
+                            float(context.brwar[int(notes[0].wave_index)].duration)
+                            * 1000
+                            / playback_ratio
+                        )), None
             if context.sound_type == SoundType.SEQ and context.brseq is not None:
                 options = None
                 if spec.get("seq_note_override") is not None or spec.get("seq_program_override") is not None or spec.get("seq_random_overrides"):
@@ -2617,10 +2901,19 @@ class PysarApi:
         loop_starts: dict[int, tuple[int, int]] = {}
         first_execution: dict[tuple[int, int], int] = {}
         loop_candidates: list[tuple[int, int, int]] = []
+        command_trace: list[tuple[int, int, Any]] = []
+        event_trace: list[tuple[int, dict[str, Any]]] = []
+        trace_limit = 64
+        trace_overflow = False
 
         def on_command(track_no: int, tick: int, command) -> None:
+            nonlocal trace_overflow
             track = int(track_no)
             command_tick = int(tick)
+            if len(command_trace) < trace_limit:
+                command_trace.append((track, command_tick, command))
+            else:
+                trace_overflow = True
             offset = int(command.offset or 0)
             first_execution.setdefault((track, offset), command_tick)
             mml = command.get_mml()
@@ -2654,6 +2947,10 @@ class PysarApi:
                 timing_segments.append((max(0, tick - last_event_tick), tempo))
                 last_event_tick = tick
             for event in events:
+                if len(event_trace) < trace_limit:
+                    event_trace.append((int(tick), event))
+                else:
+                    trace_overflow = True
                 if event.get("type") == "tempo":
                     tempo = int(event.get("tempo", tempo) or tempo)
                     tempo_changes.append((int(tick), tempo))
@@ -2664,6 +2961,9 @@ class PysarApi:
                 "loopEndMs": 0,
                 "loopStartFrame": 0,
                 "loopEndFrame": 0,
+                "audioLoopStartFrame": 0,
+                "audioLoopEndFrame": 0,
+                "audioLoopOffsetFrame": 0,
                 "sampleRate": settings.sample_rate,
             }
         # Reproduce _seq_event_times_ms' arithmetic exactly so the optimized
@@ -2701,6 +3001,9 @@ class PysarApi:
             "loopEndMs": 0,
             "loopStartFrame": 0,
             "loopEndFrame": 0,
+            "audioLoopStartFrame": 0,
+            "audioLoopEndFrame": 0,
+            "audioLoopOffsetFrame": 0,
             "sampleRate": settings.sample_rate,
         }
         if selected is not None:
@@ -2715,9 +3018,161 @@ class PysarApi:
                     "loopEndMs": loop_end_ms,
                     "loopStartFrame": round(loop_start_seconds * settings.sample_rate),
                     "loopEndFrame": round(loop_end_seconds * settings.sample_rate),
+                    "audioLoopStartFrame": round(loop_start_seconds * settings.sample_rate),
+                    "audioLoopEndFrame": round(loop_end_seconds * settings.sample_rate),
+                    "audioLoopOffsetFrame": 0,
                     "sampleRate": settings.sample_rate,
                 }
+                native_loop = None if trace_overflow else PysarApi._tied_sample_audio_loop(
+                    context,
+                    settings,
+                    selected,
+                    command_trace,
+                    event_trace,
+                    tick_to_seconds,
+                    playback["loopEndFrame"],
+                )
+                if native_loop is not None:
+                    playback.update(native_loop)
         return duration_ms, playback
+
+    @staticmethod
+    def _tied_sample_audio_loop(
+        context,
+        settings,
+        selected: tuple[int, int, int],
+        command_trace: list[tuple[int, int, Any]],
+        event_trace: list[tuple[int, dict[str, Any]]],
+        tick_to_seconds: Callable[[int], float],
+        logical_loop_end_frame: int,
+    ) -> dict[str, int] | None:
+        """Find the native PCM period of a simple tied, looped sample voice.
+
+        Repeating the BRSEQ command span as PCM is wrong for this shape: tie
+        keeps the voice phase alive when the command loop returns.  The
+        browser can instead repeat the BRWAV's own stable PCM period, starting
+        at the phase reached at the end of the first logical sequence pass.
+        Restrict this optimization to an intentionally small, provable case;
+        richer sequences continue using their authored BRSEQ loop bounds.
+        """
+        from pysar.core.format.rseq.mml import MML, is_note
+
+        if getattr(context, "brbnk", None) is None or getattr(context, "brwar", None) is None:
+            return None
+        track_no, loop_start_tick, loop_end_tick = selected
+        if loop_end_tick <= loop_start_tick:
+            return None
+
+        selected_trace = [
+            (tick, command)
+            for track, tick, command in command_trace
+            if track == track_no
+        ]
+        loop_start_index = next((
+            index for index, (tick, command) in enumerate(selected_trace)
+            if tick == loop_start_tick
+            and command.get_mml() == MML.LOOP_START
+            and (int(command.args[0]) if command.args else 0) == 0
+        ), None)
+        if loop_start_index is None:
+            return None
+        loop_end_index = next((
+            index for index in range(loop_start_index + 1, len(selected_trace))
+            if selected_trace[index][0] == loop_end_tick
+            and selected_trace[index][1].get_mml() == MML.LOOP_END
+        ), None)
+        if loop_end_index is None:
+            return None
+
+        loop_body = selected_trace[loop_start_index + 1:loop_end_index]
+        note_commands = [item for item in loop_body if is_note(item[1].opcode)]
+        if len(note_commands) != 1 or len(loop_body) != 1:
+            return None
+        note_tick, _note_command = note_commands[0]
+        if note_tick != loop_start_tick:
+            return None
+
+        tie_enabled = False
+        for tick, command in selected_trace[:loop_start_index + 1]:
+            if command.get_mml() == MML.TIE:
+                tie_enabled = bool(command.args and int(command.args[0]))
+        if not tie_enabled:
+            return None
+
+        sounding = [
+            event
+            for tick, event in event_trace
+            if loop_start_tick <= tick < loop_end_tick
+            and event.get("type") in ("note_on", "note_change")
+        ]
+        if len(sounding) != 1 or sounding[0].get("type") != "note_on":
+            return None
+        note_event = sounding[0]
+        if int(note_event.get("track", -1)) != track_no:
+            return None
+        if any(
+            int(note_event.get(key, 0) or 0) != 0
+            for key in ("mod_depth", "mod_delay")
+        ) or float(note_event.get("sweep_pitch", 0.0) or 0.0) != 0.0:
+            return None
+
+        program = (
+            int(settings.seq_program_override)
+            if settings.seq_program_override is not None
+            else int(note_event.get("program", 0))
+        )
+        note = (
+            int(settings.seq_note_override)
+            if settings.seq_note_override is not None
+            else int(note_event.get("note", 0))
+        )
+        velocity = int(note_event.get("velocity", 127))
+        region = BankWaveResolver(context.brbnk, context.brwar).resolve_info(
+            program,
+            note,
+            velocity,
+        )
+        if region is None or not region.is_looped or region.loop_end <= region.loop_start:
+            return None
+        param = region.param
+        if not (
+            int(param.attack) in (INVALID_ENVELOPE, 127)
+            and int(param.decay) in (INVALID_ENVELOPE, 127)
+            and int(param.sustain) in (INVALID_ENVELOPE, 127)
+            and int(param.hold) in (INVALID_ENVELOPE, 0, 127)
+        ):
+            return None
+
+        step = (region.sample_rate / max(1, settings.sample_rate)) * midi_ratio(
+            note,
+            int(param.original_key),
+            float(param.pitch),
+        )
+        rounded_step = round(step)
+        if rounded_step <= 0 or abs(step - rounded_step) > 1.0e-9:
+            return None
+        source_period = region.loop_end - region.loop_start
+        if source_period % rounded_step:
+            return None
+        period_frames = source_period // rounded_step
+        if period_frames <= 0:
+            return None
+
+        # AX interpolation reads four history samples. Start once that entire
+        # history window lies inside the native loop, making the captured PCM
+        # period bit-identical on every subsequent pass.
+        stable_source_position = region.loop_start + 4
+        relative_start = max(0, (stable_source_position + rounded_step - 1) // rounded_step - 1)
+        note_frame = round(tick_to_seconds(note_tick) * settings.sample_rate)
+        audio_start = note_frame + relative_start
+        audio_end = audio_start + period_frames
+        if audio_end > logical_loop_end_frame:
+            return None
+        return {
+            "audioLoopStartFrame": int(audio_start),
+            "audioLoopEndFrame": int(audio_end),
+            "audioLoopOffsetFrame": int((logical_loop_end_frame - audio_start) % period_frames),
+        }
 
     def _estimate_wave_sample_duration_ms(self, archive_file_id: int, wave_index: int) -> int:
         try:
@@ -4557,6 +5012,59 @@ class PysarApi:
             raise IndexError(f"BRWAV index {wave_index} is out of range for WAR_{file_id:04d}")
         return archive, brwar, brwar[wave_index]
 
+    def _wave_sound_loop_target(self, sound_id: int):
+        """Resolve the BRWAV whose native loop is used by one WAVE sound."""
+        archive = self.project_service.require_archive(self.session)
+        sound_id = int(sound_id)
+        entry = self.archive_service._sound_entry(archive, sound_id)
+        if entry.sound_type != SoundType.WAVE:
+            raise ValueError("Loop points are only available for WAVE sounds")
+
+        wave_sound_index = int(entry.sound_info.wave_index)
+        brwsd = archive.get_wsd(entry.file_index)
+        if not 0 <= wave_sound_index < len(brwsd):
+            raise ValueError(f"WAVE sound references missing RWSD entry #{wave_sound_index}")
+        notes = brwsd[wave_sound_index].notes
+        if not notes:
+            raise ValueError("The WAVE sound has no playable sample")
+
+        wave_index = int(notes[0].wave_index)
+        _data_file_id, audio_file_id = self.archive_service._resolve_file_index(
+            archive, entry.file_index,
+        )
+        if audio_file_id is None:
+            raise ValueError("The WAVE sound has no linked wave archive")
+        _archive, brwar, wave = self._wave_archive_sample(audio_file_id, wave_index)
+        return archive, int(audio_file_id), wave_index, brwar, wave
+
+    def _wave_sound_loop_payload(self, sound_id: int) -> dict[str, Any]:
+        archive, file_id, wave_index, _brwar, wave = self._wave_sound_loop_target(sound_id)
+        logical_files = archive._wave_archive_logical_files(file_id)
+        is_new = bool(logical_files) and all(
+            archive.is_new("wave", file_index, wave_index)
+            for file_index in logical_files
+        )
+        return {
+            "soundId": int(sound_id),
+            "archiveFileId": file_id,
+            "waveIndex": wave_index,
+            "encoding": wave.encoding.name,
+            "sampleRate": int(wave.sample_rate),
+            "samples": int(wave.n_samples),
+            "looped": bool(wave.is_looped),
+            "loopStart": int(wave.loop_start if wave.is_looped else 0),
+            "loopEnd": int(wave.loop_end),
+            "isNew": is_new,
+            "protected": bool(self.session.safe_mode and not is_new),
+        }
+
+    def get_wave_sound_loop(self, sound_id: int) -> dict:
+        """Return editable native loop points directly for one WAVE sound."""
+        try:
+            return {"ok": True, "loop": self._wave_sound_loop_payload(int(sound_id))}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def export_wave_archive_sample_to_path(self, file_id: int, wave_index: int, path: str) -> dict:
         """Export one BRWAR entry as its raw BRWAV or decoded WAV equivalent."""
         try:
@@ -4613,6 +5121,7 @@ class PysarApi:
             encoding: str | None = None,
             looped: bool | None = None,
             loop_start: int = 0,
+            loop_end: int | None = None,
     ):
         """Load raw BRWAV input or encode WAV input using the requested codec."""
         from pysar.core.format.rwav import Brwav
@@ -4625,7 +5134,7 @@ class PysarApi:
         if suffix == ".brwav":
             wave = Brwav.from_bytes(source.read_bytes())
             if looped is not None:
-                wave.set_loop(bool(looped), int(loop_start))
+                wave.set_loop(bool(looped), int(loop_start), loop_end)
             return wave
         if suffix == ".wav":
             try:
@@ -4638,6 +5147,7 @@ class PysarApi:
                 source,
                 encoding=target_codec,
                 loop_start=int(loop_start) if bool(looped) else -1,
+                loop_end=int(loop_end) if bool(looped) and loop_end is not None else -1,
             )
         raise ValueError("Choose a .brwav or uncompressed mono .wav file")
 
@@ -4664,6 +5174,7 @@ class PysarApi:
             return {
                 "looped": bool(wave.is_looped),
                 "loopStart": int(wave.loop_start if wave.is_looped else 0),
+                "loopEnd": int(wave.loop_end),
                 "samples": int(wave.n_samples),
                 "encoding": wave.encoding.name,
             }
@@ -4673,6 +5184,7 @@ class PysarApi:
             return {
                 "looped": False,
                 "loopStart": 0,
+                "loopEnd": int(wav.getnframes()),
                 "samples": int(wav.getnframes()),
                 "encoding": None,
             }
@@ -4685,6 +5197,7 @@ class PysarApi:
         encoding: str | None = None,
         looped: bool | None = None,
         loop_start: int = 0,
+        loop_end: int | None = None,
     ) -> dict:
         """Replace one BRWAR entry while retaining all BRSAR copy metadata.
 
@@ -4693,7 +5206,7 @@ class PysarApi:
         """
         try:
             replacement = self._replacement_brwav_from_path(
-                path, encoding, looped, loop_start,
+                path, encoding, looped, loop_start, loop_end,
             )
 
             archive, brwar, _old_wave = self._wave_archive_sample(file_id, wave_index)
@@ -4734,6 +5247,7 @@ class PysarApi:
             file_id: int,
             wave_index: int,
             patch: dict,
+            include_ui_data: bool = True,
     ) -> dict:
         """Update editable loop metadata for one BRWAV."""
         try:
@@ -4751,7 +5265,8 @@ class PysarApi:
             loop_start = int(
                 patch.get("loopStart", wave.loop_start if wave.is_looped else 0)
             )
-            wave.set_loop(looped, loop_start)
+            loop_end = int(patch.get("loopEnd", wave.loop_end))
+            wave.set_loop(looped, loop_start, loop_end)
             brwar.replace(wave_index, wave)
             with self.project_service.archive_transaction(
                 self.session,
@@ -4763,14 +5278,35 @@ class PysarApi:
             details = self._wave_archive_details_payload(
                 self.archive_service.get_wave_archive_details(self.session, file_id)
             )
-            return {
+            result = {
                 "ok": True,
                 "dirty": True,
                 "fileId": file_id,
                 "waveIndex": wave_index,
                 "wave": details["waves"][wave_index],
-                "data": self._ui_data(),
             }
+            if bool(include_ui_data):
+                result["data"] = self._ui_data()
+            return result
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def update_wave_sound_loop(self, sound_id: int, patch: dict) -> dict:
+        """Edit the native loop used by a WAVE sound without exposing BRWAR routing."""
+        try:
+            _archive, file_id, wave_index, _brwar, _wave = self._wave_sound_loop_target(
+                int(sound_id)
+            )
+            result = self.update_wave_archive_sample(
+                file_id,
+                wave_index,
+                patch,
+                include_ui_data=False,
+            )
+            if not result.get("ok"):
+                return result
+            result["loop"] = self._wave_sound_loop_payload(int(sound_id))
+            return result
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -4781,11 +5317,12 @@ class PysarApi:
             encoding: str | None = None,
             looped: bool | None = None,
             loop_start: int = 0,
+            loop_end: int | None = None,
     ) -> dict:
         """Append a BRWAV or encoded WAV to an existing BRWAR."""
         try:
             wave = self._replacement_brwav_from_path(
-                path, encoding, looped, loop_start,
+                path, encoding, looped, loop_start, loop_end,
             )
             archive = self.project_service.require_archive(self.session)
             file_id = int(file_id)
@@ -5697,6 +6234,8 @@ class PysarApi:
                     "samples": sample_count,
                     "durationMs": int(round(sample_count * 1000 / sample_rate)),
                     "looped": bool(brwav.is_looped),
+                    "loopStart": int(brwav.loop_start if brwav.is_looped else 0),
+                    "loopEnd": int(brwav.loop_end),
                 }
 
             if entry.sound_type == SoundType.STRM:
@@ -6031,11 +6570,12 @@ class PysarApi:
         encoding: str | None = None,
         looped: bool | None = None,
         loop_start: int = 0,
+        loop_end: int | None = None,
     ) -> dict:
         """Replace the one playable WAVE sound sample from WAV or raw BRWAV."""
         try:
             replacement = self._replacement_brwav_from_path(
-                path, encoding, looped, loop_start,
+                path, encoding, looped, loop_start, loop_end,
             )
             archive = self.project_service.require_archive(self.session)
             entry = self.archive_service._sound_entry(archive, int(sound_id))
@@ -7186,14 +7726,26 @@ class PysarApi:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def add_wave_sound_from_wav_path(self, name: str, wav_path: str, player_index: int = 0, volume: int = 90, brwsd_file_index: int | None = None) -> dict:
+    def add_wave_sound_from_wav_path(
+            self,
+            name: str,
+            wav_path: str,
+            player_index: int = 0,
+            volume: int = 90,
+            brwsd_file_index: int | None = None,
+            encoding: str = "ADPCM",
+            looped: bool = False,
+            loop_start: int = 0,
+            loop_end: int | None = None,
+    ) -> dict:
         try:
             wav_file = Path(str(wav_path)).expanduser()
             if not wav_file.is_file():
                 return {"ok": False, "error": f"WAV file not found: {wav_path}"}
 
-            from pysar.core.format.rwav import Brwav
-            brwav = Brwav.from_wav(str(wav_file))
+            brwav = self._replacement_brwav_from_path(
+                str(wav_file), encoding or "ADPCM", looped, loop_start, loop_end,
+            )
 
             archive = self.project_service.require_archive(self.session)
             archive.add_wav_sound(
@@ -7209,7 +7761,17 @@ class PysarApi:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def add_wave_sound_from_wav(self, name: str, player_index: int = 0, volume: int = 90, brwsd_file_index: int | None = None) -> dict:
+    def add_wave_sound_from_wav(
+            self,
+            name: str,
+            player_index: int = 0,
+            volume: int = 90,
+            brwsd_file_index: int | None = None,
+            encoding: str = "ADPCM",
+            looped: bool = False,
+            loop_start: int = 0,
+            loop_end: int | None = None,
+    ) -> dict:
         if self._window is None:
             return {"ok": False, "error": "No window"}
         try:
@@ -7221,7 +7783,17 @@ class PysarApi:
             if not result:
                 return {"ok": False, "error": "Cancelled"}
             wav_path = result[0] if isinstance(result, (list, tuple)) else result
-            return self.add_wave_sound_from_wav_path(name, str(wav_path), player_index, volume, brwsd_file_index)
+            return self.add_wave_sound_from_wav_path(
+                name,
+                str(wav_path),
+                player_index,
+                volume,
+                brwsd_file_index,
+                encoding,
+                looped,
+                loop_start,
+                loop_end,
+            )
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 

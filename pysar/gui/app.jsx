@@ -288,7 +288,7 @@ function AboutDialog({ appMeta, onClose, onError }) {
 
 function App() {
   window.PYSAR_DATA = window.PYSAR_DATA || { archive: null, activeDocumentId: null, documents: [], sounds: [], banks: [], groups: [], players: [], waveArchives: [], files: [] };
-  window.PYSAR_APP = window.PYSAR_APP || { name: "PYSAR - 1.1.0", version: "1.1.0", displayVersion: "1.1.0", phase: "Stable" };
+  window.PYSAR_APP = window.PYSAR_APP || { name: "PYSAR - 1.1.1", version: "1.1.1", displayVersion: "1.1.1", phase: "Stable" };
   const D = window.PYSAR_DATA;
   const [tw, setTwState] = useStateA({ ...APPEARANCE });
   const setTweak = useCallbackA((key, value) => setTwState((prev) => ({ ...prev, [key]: value })), []);
@@ -346,10 +346,13 @@ function App() {
   const [windowCloseInfo, setWindowCloseInfo] = useStateA(null);
   const [dumpOptionsOpen, setDumpOptionsOpen] = useStateA(false);
   const [dumpStatus, setDumpStatus] = useStateA(null);
+  const [batchExportOpen, setBatchExportOpen] = useStateA(false);
+  const [batchExportStatus, setBatchExportStatus] = useStateA(null);
   const [menuOpen, setMenuOpen] = useStateA(null);
   const [showAbout, setShowAbout] = useStateA(false);
   const [safeModeBusy, setSafeModeBusy] = useStateA(false);
   const bankMutationRef = React.useRef(false);
+  const archiveExportBusy = !!dumpStatus?.busy || !!batchExportStatus?.busy;
 
   // playback state
   const [playingId, setPlayingId] = useStateA(null);
@@ -373,6 +376,7 @@ function App() {
   const [seqVariationRevision, setSeqVariationRevision] = useStateA(0);
   const [seqEditorSourceBySound, setSeqEditorSourceBySound] = useStateA({});
   const [strmPlaybackBySound, setStrmPlaybackBySound] = useStateA({});
+  const [wavePlaybackBySound, setWavePlaybackBySound] = useStateA({});
   const [soundListAutoPlayEnabled, setSoundListAutoPlayEnabled] = useStateA(false);
   const audioRef = React.useRef(null);
   const playingSoundRef = React.useRef(null);
@@ -383,6 +387,7 @@ function App() {
   const durationRequestRef = React.useRef(0);
   const durationTargetRef = React.useRef(null);
   const strmPlaybackBySoundRef = React.useRef({});
+  const wavePlaybackBySoundRef = React.useRef({});
   const strmPlaybackLoadsRef = React.useRef(new Set());
   const strmPlaybackRevisionRef = React.useRef(0);
   const strmTrackTransitionRef = React.useRef(null);
@@ -408,6 +413,7 @@ function App() {
     seqPlaybackBySound,
     seqEditorSourceBySound,
     strmPlaybackBySound,
+    wavePlaybackBySound,
     transportSound: playingSound,
     transportDurationMs: durationMs,
     transportPlayheadMs: playheadMsRef.current,
@@ -678,6 +684,21 @@ function App() {
           return {
             ...current,
             mode: payload.mode || current.mode,
+            progress: {
+              completed: Math.max(0, Number(payload.completed || 0)),
+              total: Math.max(0, Number(payload.total || 0)),
+              percent: Math.max(0, Math.min(100, Number(payload.percent || 0))),
+              detail: String(payload.detail || "Working…"),
+            },
+          };
+        });
+        return;
+      }
+      if (type === "batch_export_progress" && payload) {
+        setBatchExportStatus((current) => {
+          if (!current?.busy) return current;
+          return {
+            ...current,
             progress: {
               completed: Math.max(0, Number(payload.completed || 0)),
               total: Math.max(0, Number(payload.total || 0)),
@@ -1256,6 +1277,10 @@ function App() {
       let loopStartFrame = 0;
       let loopEndFrame = 0;
       let loopFrameCount = 0;
+      let audioLoopStartFrame = 0;
+      let audioLoopEndFrame = 0;
+      let audioLoopFrameCount = 0;
+      let audioLoopOffsetFrame = 0;
       const loopParts = [];
       let loopBytes = 0;
       let loopCaptureOverflow = false;
@@ -1268,11 +1293,11 @@ function App() {
       let loopEnabled = false;
 
       function captureLoopOverlap(absoluteStart, bytes) {
-        if (loopFrameCount <= 0 || loopCaptureOverflow) return;
+        if (audioLoopFrameCount <= 0 || loopCaptureOverflow) return;
         const frames = Math.floor(bytes.length / wav.blockAlign);
         const absoluteEnd = absoluteStart + frames;
-        const overlapStart = Math.max(loopStartFrame, absoluteStart);
-        const overlapEnd = Math.min(loopEndFrame, absoluteEnd);
+        const overlapStart = Math.max(audioLoopStartFrame, absoluteStart);
+        const overlapEnd = Math.min(audioLoopEndFrame, absoluteEnd);
         if (overlapEnd <= overlapStart) return;
         const firstByte = (overlapStart - absoluteStart) * wav.blockAlign;
         const lastByte = (overlapEnd - absoluteStart) * wav.blockAlign;
@@ -1300,11 +1325,30 @@ function App() {
             ? Number(metadata.loopEndFrame) * wav.sampleRate / metadataSampleRate
             : Number(metadata.loopEndMs || 0) * wav.sampleRate / 1000,
         )) : 0;
+        const nextAudioLoopStartFrame = metadata.looped ? Math.max(0, Math.round(
+          metadata.audioLoopStartFrame != null
+            ? Number(metadata.audioLoopStartFrame) * wav.sampleRate / metadataSampleRate
+            : nextLoopStartFrame,
+        )) : 0;
+        const nextAudioLoopEndFrame = metadata.looped ? Math.max(nextAudioLoopStartFrame, Math.round(
+          metadata.audioLoopEndFrame != null
+            ? Number(metadata.audioLoopEndFrame) * wav.sampleRate / metadataSampleRate
+            : nextLoopEndFrame,
+        )) : 0;
+        const nextAudioLoopFrameCount = nextAudioLoopEndFrame - nextAudioLoopStartFrame;
+        const nextAudioLoopOffsetFrame = nextAudioLoopFrameCount > 0
+          ? Math.max(0, Math.round(
+            Number(metadata.audioLoopOffsetFrame || 0) * wav.sampleRate / metadataSampleRate,
+          )) % nextAudioLoopFrameCount
+          : 0;
         loopRequested = !!metadata.loopEnabled;
         if (
           loopMetadataResolved
           && nextLoopStartFrame === loopStartFrame
           && nextLoopEndFrame === loopEndFrame
+          && nextAudioLoopStartFrame === audioLoopStartFrame
+          && nextAudioLoopEndFrame === audioLoopEndFrame
+          && nextAudioLoopOffsetFrame === audioLoopOffsetFrame
         ) {
           loopEnabled = loopRequested && loopFrameCount > 0;
           if (loopEnabled && loopSource) loopSource.loop = true;
@@ -1316,11 +1360,15 @@ function App() {
         loopStartFrame = nextLoopStartFrame;
         loopEndFrame = nextLoopEndFrame;
         loopFrameCount = loopEndFrame - loopStartFrame;
+        audioLoopStartFrame = nextAudioLoopStartFrame;
+        audioLoopEndFrame = nextAudioLoopEndFrame;
+        audioLoopFrameCount = nextAudioLoopFrameCount;
+        audioLoopOffsetFrame = nextAudioLoopOffsetFrame;
         loopEnabled = loopRequested && loopFrameCount > 0;
         loopParts.length = 0;
         loopBytes = 0;
         loopCaptureOverflow = pendingMetadataOverflow;
-        if (!loopCaptureOverflow && loopFrameCount > 0) {
+        if (!loopCaptureOverflow && audioLoopFrameCount > 0) {
           for (const part of pendingMetadataParts) captureLoopOverlap(part.startFrame, part.bytes);
         }
         pendingMetadataParts.length = 0;
@@ -1402,19 +1450,19 @@ function App() {
         scheduledFrames += frames;
       }
       function installSequenceLoop() {
-        if (!loopEnabled || loopSource || loopFrameCount <= 0 || loopCaptureOverflow) return false;
-        if (loopBytes !== loopFrameCount * wav.blockAlign) return false;
+        if (!loopEnabled || loopSource || audioLoopFrameCount <= 0 || loopCaptureOverflow) return false;
+        if (loopBytes !== audioLoopFrameCount * wav.blockAlign) return false;
         const bytes = new Uint8Array(loopBytes);
         let cursor = 0;
         for (const part of loopParts) {
           bytes.set(part, cursor);
           cursor += part.length;
         }
-        const buffer = context.createBuffer(wav.channels, loopFrameCount, wav.sampleRate);
+        const buffer = context.createBuffer(wav.channels, audioLoopFrameCount, wav.sampleRate);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         for (let channel = 0; channel < wav.channels; channel += 1) {
           const output = buffer.getChannelData(channel);
-          for (let frame = 0; frame < loopFrameCount; frame += 1) {
+          for (let frame = 0; frame < audioLoopFrameCount; frame += 1) {
             output[frame] = view.getInt16(frame * wav.blockAlign + channel * 2, true) / 32768;
           }
         }
@@ -1428,7 +1476,7 @@ function App() {
           if (!loopEnabled) finishPlayback();
         };
         loopSource = source;
-        source.start(nextStartTime);
+        source.start(nextStartTime, audioLoopOffsetFrame / wav.sampleRate);
         return true;
       }
       function consumePcm(bytes, flush = false) {
@@ -1615,6 +1663,7 @@ function App() {
     offsetMs = 0,
     requestId = null,
     soundId = null,
+    initialLoopEnabled = null,
     onEnded = null,
   ) {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -1648,7 +1697,11 @@ function App() {
       let active = false;
       let closed = false;
       let ended = false;
-      let loopEnabled = loopLength > 0 && !!strmPlaybackBySoundRef.current[soundId]?.loopEnabled;
+      let loopEnabled = loopLength > 0 && !!(
+        initialLoopEnabled == null
+          ? strmPlaybackBySoundRef.current[soundId]?.loopEnabled
+          : initialLoopEnabled
+      );
 
       function normalized(value, shouldLoop = loopEnabled) {
         const seconds = Math.max(0, Number(value) || 0);
@@ -2325,6 +2378,14 @@ function App() {
     setSeqPlaybackBySound(next);
     return nextValue;
   }
+  function setWavePlayback(soundId, patch) {
+    const current = wavePlaybackBySoundRef.current[soundId] || {};
+    const nextValue = { ...current, ...patch };
+    const next = { ...wavePlaybackBySoundRef.current, [soundId]: nextValue };
+    wavePlaybackBySoundRef.current = next;
+    setWavePlaybackBySound(next);
+    return nextValue;
+  }
   function applySeqPlaybackMetadata(soundId, metadata) {
     if (!metadata) return seqPlaybackBySoundRef.current[soundId] || {};
     const current = seqPlaybackBySoundRef.current[soundId] || {};
@@ -2337,6 +2398,15 @@ function App() {
       loopEndMs: Math.max(0, Number(metadata.loopEndMs) || 0),
       loopStartFrame: Math.max(0, Number(metadata.loopStartFrame) || 0),
       loopEndFrame: Math.max(0, Number(metadata.loopEndFrame) || 0),
+      audioLoopStartFrame: Math.max(
+        0,
+        Number(metadata.audioLoopStartFrame ?? metadata.loopStartFrame) || 0,
+      ),
+      audioLoopEndFrame: Math.max(
+        0,
+        Number(metadata.audioLoopEndFrame ?? metadata.loopEndFrame) || 0,
+      ),
+      audioLoopOffsetFrame: Math.max(0, Number(metadata.audioLoopOffsetFrame) || 0),
       sampleRate: Math.max(1, Number(metadata.sampleRate) || 32000),
       loopEnabled,
     });
@@ -2359,6 +2429,28 @@ function App() {
       tracks,
       selectedTrackIndices,
       loopEnabled,
+    });
+  }
+  function applyWavePlaybackMetadata(soundId, metadata) {
+    if (!metadata) return wavePlaybackBySoundRef.current[soundId] || {};
+    const current = wavePlaybackBySoundRef.current[soundId] || {};
+    const looped = !!metadata.looped;
+    const layoutChanged = (
+      current.looped !== looped
+      || Number(current.loopStartSample) !== Number(metadata.loopStartSample)
+      || Number(current.loopEndSample) !== Number(metadata.loopEndSample)
+    );
+    const preferredLoopEnabled = layoutChanged
+      ? looped
+      : (typeof current.loopEnabled === "boolean" ? current.loopEnabled : looped);
+    return setWavePlayback(soundId, {
+      looped,
+      loopStartMs: Math.max(0, Number(metadata.loopStartMs) || 0),
+      loopEndMs: Math.max(0, Number(metadata.loopEndMs) || 0),
+      loopStartSample: Math.max(0, Number(metadata.loopStartSample) || 0),
+      loopEndSample: Math.max(0, Number(metadata.loopEndSample) || 0),
+      sampleRate: Math.max(1, Number(metadata.sampleRate) || 32000),
+      loopEnabled: soundListAutoPlayEnabledRef.current ? false : preferredLoopEnabled,
     });
   }
   function loadStrmPlaybackMetadata(sound) {
@@ -2406,6 +2498,22 @@ function App() {
     }
     audioRef.current?.setLoopEnabled?.(enabled);
   }
+  function changeWaveLoop(loopEnabled) {
+    const sound = playingSoundRef.current || playingSound;
+    if (!sound || sound.type !== "WAVE") return;
+    const current = wavePlaybackBySoundRef.current[sound.id] || {};
+    if (!current.looped) return;
+    const enabled = !!loopEnabled;
+    setWavePlayback(sound.id, { loopEnabled: enabled });
+    if (enabled) {
+      soundListAutoPlayEnabledRef.current = false;
+      setSoundListAutoPlayEnabled(false);
+    }
+    audioRef.current?.setLoopEnabled?.(enabled);
+    if (audioRef.current?.isWebAudioLoop) {
+      setPlayheadMs(Math.round(audioRef.current.currentTime * 1000));
+    }
+  }
   function changeStrmTrackSelection(selectedTrackIndices) {
     if (!playingSound || playingSound.type !== "STRM") return;
     const current = strmPlaybackBySoundRef.current[playingSound.id] || {};
@@ -2439,6 +2547,14 @@ function App() {
     if (enabled && sequencePlayback?.loopEnabled) {
       setSeqPlayback(sound.id, { loopEnabled: false });
       audioRef.current?.setLoopEnabled?.(false);
+    }
+    const wavePlayback = sound.type === "WAVE" ? (wavePlaybackBySoundRef.current[sound.id] || {}) : null;
+    if (enabled && wavePlayback?.loopEnabled) {
+      setWavePlayback(sound.id, { loopEnabled: false });
+      audioRef.current?.setLoopEnabled?.(false);
+      if (audioRef.current?.isWebAudioLoop) {
+        setPlayheadMs(Math.round(audioRef.current.currentTime * 1000));
+      }
     }
   }
   function sequenceVariationFor(sound) {
@@ -2519,7 +2635,11 @@ function App() {
     if (transportSound.type === "STRM" && result.strmPlayback) {
       applyStrmPlaybackMetadata(transportSound.id, result.strmPlayback);
     }
+    if (transportSound.type === "WAVE" && result.wavePlayback) {
+      applyWavePlaybackMetadata(transportSound.id, result.wavePlayback);
+    }
     const streamPlayback = strmPlaybackBySoundRef.current[transportSound.id];
+    const wavePlayback = wavePlaybackBySoundRef.current[transportSound.id];
     const handlePlaybackEnded = (endedDuration) => {
       // Every audio adapter calls this only while it still owns audioRef. The
       // request check additionally prevents stop, seek-to-end, or a sound
@@ -2543,6 +2663,13 @@ function App() {
         } else {
           play(transportSound, loopStartMs, true, playback.selectedTrackIndices);
         }
+      } else if (
+        transportSound.type === "WAVE"
+        && wavePlaybackBySoundRef.current[transportSound.id]?.looped
+        && wavePlaybackBySoundRef.current[transportSound.id]?.loopEnabled
+      ) {
+        const waveLoop = wavePlaybackBySoundRef.current[transportSound.id];
+        play(transportSound, waveLoop.loopStartMs || 0, true);
       } else if (
         transportSound.type === "SEQ"
         && seqPlaybackBySoundRef.current[transportSound.id]?.looped
@@ -2585,6 +2712,20 @@ function App() {
         offsetMs,
         requestId,
         transportSound.id,
+        streamPlayback.loopEnabled,
+        handlePlaybackEnded,
+      );
+      if (attached || requestId !== playRequestRef.current) return;
+    }
+    if (transportSound.type === "WAVE" && wavePlayback?.looped) {
+      const attached = await attachLoopingAudio(
+        result.url,
+        result.durationMs || currentDuration,
+        wavePlayback.loopStartMs || 0,
+        offsetMs,
+        requestId,
+        transportSound.id,
+        wavePlayback.loopEnabled,
         handlePlaybackEnded,
       );
       if (attached || requestId !== playRequestRef.current) return;
@@ -2694,6 +2835,7 @@ function App() {
       if (durationTargetRef.current !== transportSound.id) return;
       if (!result?.ok) return;
       if (result.seqPlayback) applySeqPlaybackMetadata(transportSound.id, result.seqPlayback);
+      if (result.wavePlayback) applyWavePlaybackMetadata(transportSound.id, result.wavePlayback);
       const nextDuration = Math.max(0, Math.round(result.durationMs || 0));
       setDurationMs(nextDuration);
       setPlayingSound((current) => {
@@ -3080,6 +3222,8 @@ function App() {
     strmPlaybackRevisionRef.current += 1;
     strmPlaybackLoadsRef.current.clear();
     setStrmPlaybackBySound(strmPlaybackBySoundRef.current);
+    wavePlaybackBySoundRef.current = saved?.wavePlaybackBySound || {};
+    setWavePlaybackBySound(wavePlaybackBySoundRef.current);
     soundListAutoPlayEnabledRef.current = false;
     visibleSoundIdsRef.current = [];
     setSoundListAutoPlayEnabled(false);
@@ -3138,7 +3282,7 @@ function App() {
   }
 
   async function activateArchiveDocument(documentId) {
-    if (!window.pysar || !documentId || documentId === activeDocumentIdRef.current || loadingArchive || archiveActivationRef.current || dumpStatus?.busy) return;
+    if (!window.pysar || !documentId || documentId === activeDocumentIdRef.current || loadingArchive || archiveActivationRef.current || archiveExportBusy) return;
     rememberActiveArchiveWorkspace();
     const cachedData = archiveDataByDocumentRef.current[documentId] || null;
     archiveActivationRef.current = true;
@@ -3207,6 +3351,8 @@ function App() {
     setSeqVariationsBySound({});
     seqPlaybackBySoundRef.current = {};
     setSeqPlaybackBySound({});
+    wavePlaybackBySoundRef.current = {};
+    setWavePlaybackBySound({});
     setArchive(data.archive);
     if (data.archive) setSafeMode(data.archive.safeMode !== false);
     if (data.archive) setDirty(!!data.archive.dirty);
@@ -3373,13 +3519,13 @@ function App() {
   }
 
   function chooseArchiveDump() {
-    if (!window.pysar || dumpStatus?.busy) return;
+    if (!window.pysar || archiveExportBusy) return;
     setMenuOpen(null);
     setDumpOptionsOpen(true);
   }
 
   async function dumpArchive(mode) {
-    if (!window.pysar || dumpStatus?.busy) return;
+    if (!window.pysar || archiveExportBusy) return;
     setMenuOpen(null);
     const dumpMode = mode === "original" ? "original" : "converted";
     setDumpStatus({
@@ -3460,6 +3606,80 @@ function App() {
     }
   }
 
+  function chooseBatchExport() {
+    if (!window.pysar || archiveExportBusy) return;
+    setMenuOpen(null);
+    setBatchExportOpen(true);
+  }
+
+  async function batchExportSounds(soundIds) {
+    if (!window.pysar || archiveExportBusy || !soundIds?.length) return;
+    setBatchExportOpen(false);
+    setBatchExportStatus({
+      busy: true,
+      aborting: false,
+      cancelled: false,
+      path: null,
+      error: null,
+      summary: null,
+      partial: false,
+      progress: { completed: 0, total: 0, percent: 0, detail: "Waiting for a destination folder…" },
+    });
+    const result = await window.pysar.call("batch_export_sounds_dialog", soundIds)
+      .catch((error) => ({ ok: false, error: String(error) }));
+    if (!result?.ok) {
+      if (result?.cancelled) {
+        setBatchExportStatus({
+          busy: false,
+          aborting: false,
+          cancelled: true,
+          path: null,
+          error: null,
+          summary: null,
+          partial: false,
+          progress: null,
+        });
+      } else if (result?.error === "Cancelled") {
+        setBatchExportStatus(null);
+      } else {
+        setBatchExportStatus({
+          busy: false,
+          aborting: false,
+          cancelled: false,
+          path: null,
+          error: result?.error || "Batch export failed",
+          summary: null,
+          partial: false,
+          progress: null,
+        });
+      }
+      return;
+    }
+    setBatchExportStatus({
+      busy: false,
+      aborting: false,
+      cancelled: false,
+      path: result.path || null,
+      error: null,
+      summary: result.summary || null,
+      partial: !!result.partial,
+      progress: null,
+    });
+  }
+
+  async function abortBatchExport() {
+    if (!window.pysar || !batchExportStatus?.busy || batchExportStatus?.aborting) return;
+    setBatchExportStatus((current) => current?.busy ? { ...current, aborting: true } : current);
+    const result = await window.pysar.call("abort_dump")
+      .catch((error) => ({ ok: false, error: String(error) }));
+    if (!result?.ok) {
+      setBatchExportStatus((current) => current?.busy ? { ...current, aborting: false } : current);
+      setOpenError(result?.error || "Could not abort batch export");
+    } else if (!result.abortRequested) {
+      setBatchExportStatus((current) => current?.busy ? { ...current, aborting: false } : current);
+    }
+  }
+
   async function closeArchive(documentId = activeDocumentIdRef.current, discard = false) {
     if (!window.pysar) return;
     const targetId = documentId || activeDocumentIdRef.current;
@@ -3510,16 +3730,16 @@ function App() {
   }
 
   function requestOpen() {
-    if (dumpStatus?.busy || loadingArchive) return;
+    if (archiveExportBusy || loadingArchive) return;
     openArchive();
   }
   function requestOpenRecent(path) {
-    if (!path || dumpStatus?.busy || loadingArchive) return;
+    if (!path || archiveExportBusy || loadingArchive) return;
     setMenuOpen(null);
     openRecentArchive(path);
   }
   function requestClose(documentId = activeDocumentIdRef.current) {
-    if (dumpStatus?.busy) return;
+    if (archiveExportBusy) return;
     const document = documents.find((candidate) => candidate.id === documentId);
     const hasChanges = documentId === activeDocumentIdRef.current ? dirty : !!document?.dirty;
     if (hasChanges) {
@@ -3632,6 +3852,20 @@ function App() {
     }
   }
 
+  async function updateWaveSoundLoop(soundId, patch) {
+    if (!window.pysar) return { ok: false, error: "PYSAR API is unavailable" };
+    const result = await window.pysar.call("update_wave_sound_loop", soundId, patch)
+      .catch((error) => ({ ok: false, error: String(error) }));
+    if (!result?.ok) {
+      setOpenError(result?.error || "Could not update this sound's WAV loop");
+      return result;
+    }
+    if (result.dirty) setDirty(true);
+    const active = playingSoundRef.current;
+    if (active?.type === "WAVE" && Number(active.id) === Number(soundId)) stop();
+    return result;
+  }
+
   async function renameSound(sound) {
     if (!window.pysar || sound?.id == null || sound.protected) return false;
     const requested = await window.pysarPrompt("Rename sound", sound.name || "", {
@@ -3677,6 +3911,7 @@ function App() {
       encoding: selection.encoding,
       looped: selection.looped,
       loopStart: selection.loopStart,
+      loopEnd: selection.loopEnd,
       samples: selection.samples,
     });
   }
@@ -3729,6 +3964,7 @@ function App() {
     encoding = null,
     looped = null,
     loopStart = 0,
+    loopEnd = null,
   ) {
     if (!window.pysar || archiveId == null || waveIndex == null || !path) return;
     const result = await window.pysar.call(
@@ -3739,6 +3975,7 @@ function App() {
       encoding,
       looped,
       loopStart,
+      loopEnd,
     )
       .catch((error) => ({ ok: false, error: String(error) }));
     if (!result?.ok) {
@@ -3789,6 +4026,7 @@ function App() {
     encoding = null,
     looped = null,
     loopStart = 0,
+    loopEnd = null,
   ) {
     if (!window.pysar || archiveId == null || !path) return false;
     const result = await window.pysar.call(
@@ -3798,6 +4036,7 @@ function App() {
       encoding,
       looped,
       loopStart,
+      loopEnd,
     ).catch((error) => ({ ok: false, error: String(error) }));
     if (!result?.ok) {
       if (result?.error !== "Cancelled") setOpenError(result?.error || "Could not add BRWAV");
@@ -3835,6 +4074,7 @@ function App() {
       encoding: selection.encoding,
       looped: selection.looped,
       loopStart: selection.loopStart,
+      loopEnd: selection.loopEnd,
       samples: selection.samples,
     });
   }
@@ -4052,7 +4292,7 @@ function App() {
     return true;
   }
 
-  async function replaceWaveSound(soundId, path, encoding = null, looped = null, loopStart = 0) {
+  async function replaceWaveSound(soundId, path, encoding = null, looped = null, loopStart = 0, loopEnd = null) {
     if (!window.pysar || soundId == null || !path) return;
     const result = await window.pysar.call(
       "replace_wave_sound_from_path",
@@ -4061,6 +4301,7 @@ function App() {
       encoding,
       looped,
       loopStart,
+      loopEnd,
     )
       .catch((error) => ({ ok: false, error: String(error) }));
     if (!result?.ok) {
@@ -4099,6 +4340,7 @@ function App() {
       encoding: selection.encoding,
       looped: selection.looped,
       loopStart: selection.loopStart,
+      loopEnd: selection.loopEnd,
       samples: selection.samples,
     });
   }
@@ -4697,6 +4939,8 @@ function App() {
     strmPlaybackLoadsRef.current.clear();
     strmPlaybackBySoundRef.current = {};
     setStrmPlaybackBySound({});
+    wavePlaybackBySoundRef.current = {};
+    setWavePlaybackBySound({});
     if (result.dirty) setDirty(true);
     if (result.data) handleDataRefresh(result.data);
     // Sound-table IDs after the removed row shift down. Close sound detail
@@ -4774,7 +5018,7 @@ function App() {
   // keyboard shortcuts for save, open, close
   useEffectA(() => {
     function onKey(event) {
-      if (dumpStatus?.busy && (event.metaKey || event.ctrlKey) && ["s", "o", "w"].includes(event.key.toLowerCase())) {
+      if (archiveExportBusy && (event.metaKey || event.ctrlKey) && ["s", "o", "w"].includes(event.key.toLowerCase())) {
         event.preventDefault();
         return;
       }
@@ -4794,7 +5038,7 @@ function App() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [dirty, archive, dumpStatus?.busy, loadingArchive]);
+  }, [dirty, archive, archiveExportBusy, loadingArchive]);
 
   const tab = tabs.find((t) => t.id === activeTab);
   const pendingCloseDocument = documents.find((document) => document.id === pendingCloseDocumentId);
@@ -4951,7 +5195,7 @@ function App() {
           File
           {menuOpen === "file" && (
             <div className="menu-dropdown" role="menu">
-              <button className="menu-entry" onClick={() => { setMenuOpen(null); requestOpen(); }} disabled={loadingArchive || !!dumpStatus?.busy}>
+              <button className="menu-entry" onClick={() => { setMenuOpen(null); requestOpen(); }} disabled={loadingArchive || archiveExportBusy}>
                 Open…<span className="shortcut">{appShortcut("O")}</span>
               </button>
               <div className="menu-submenu">
@@ -4971,7 +5215,7 @@ function App() {
                       key={item.path}
                       className="menu-entry menu-recent-entry"
                       title={item.path}
-                      disabled={loadingArchive || !!dumpStatus?.busy || item.exists === false}
+                      disabled={loadingArchive || archiveExportBusy || item.exists === false}
                       onClick={(event) => {
                         event.stopPropagation();
                         requestOpenRecent(item.path);
@@ -5028,7 +5272,10 @@ function App() {
                 <button className="menu-entry" onClick={() => { setMenuOpen(null); findUnusedArchiveResources(); }}>
                   Find Unused Resources…
                 </button>
-                <button className="menu-entry" onClick={chooseArchiveDump} disabled={!!dumpStatus?.busy}>
+                <button className="menu-entry" onClick={chooseBatchExport} disabled={archiveExportBusy}>
+                  {batchExportStatus?.busy ? "Exporting Sounds…" : "Batch Export…"}
+                </button>
+                <button className="menu-entry" onClick={chooseArchiveDump} disabled={archiveExportBusy}>
                   {dumpStatus?.busy ? "Dumping Archive…" : "Dump Archive…"}
                 </button>
               </div>
@@ -5056,14 +5303,14 @@ function App() {
             <div
               role="tab"
               aria-selected={document.id === activeDocumentId}
-              aria-disabled={loadingArchive || !!dumpStatus?.busy}
+              aria-disabled={loadingArchive || archiveExportBusy}
               tabIndex={document.id === activeDocumentId ? 0 : -1}
               key={document.id}
               className={`archive-tab${document.id === activeDocumentId ? " active" : ""}`}
               title={document.path || document.name}
-              onClick={() => { if (!loadingArchive && !dumpStatus?.busy) activateArchiveDocument(document.id); }}
+              onClick={() => { if (!loadingArchive && !archiveExportBusy) activateArchiveDocument(document.id); }}
               onKeyDown={(event) => {
-                if ((event.key === "Enter" || event.key === " ") && !loadingArchive && !dumpStatus?.busy) {
+                if ((event.key === "Enter" || event.key === " ") && !loadingArchive && !archiveExportBusy) {
                   event.preventDefault();
                   activateArchiveDocument(document.id);
                 }
@@ -5079,7 +5326,7 @@ function App() {
                 title={`Close ${document.name}`}
                 onClick={(event) => {
                   event.stopPropagation();
-                  if (!loadingArchive && !dumpStatus?.busy) requestClose(document.id);
+                  if (!loadingArchive && !archiveExportBusy) requestClose(document.id);
                 }}
               >{"\u00d7"}</button>
             </div>
@@ -5089,7 +5336,7 @@ function App() {
           type="button"
           className="archive-tab-add"
           onClick={requestOpen}
-          disabled={loadingArchive || !!dumpStatus?.busy}
+          disabled={loadingArchive || archiveExportBusy}
           title="Open another archive"
           aria-label="Open another archive"
         >+</button>
@@ -5269,6 +5516,7 @@ function App() {
             item={selectedItem}
             onNavigateReferrer={navigateToReferrer}
             onUpdateSound={updateSoundProperty}
+            onUpdateSoundLoop={updateWaveSoundLoop}
             onRenameSound={renameSound}
             onDeleteSound={deleteSound}
             onRenameBank={renameBank}
@@ -5299,6 +5547,7 @@ function App() {
         volume={volume}
         strmPlayback={playingSound?.type === "STRM" ? strmPlaybackBySound[playingSound.id] : null}
         seqPlayback={playingSound?.type === "SEQ" ? seqPlaybackBySound[playingSound.id] : null}
+        wavePlayback={playingSound?.type === "WAVE" ? wavePlaybackBySound[playingSound.id] : null}
         autoPlayEnabled={soundListAutoPlayEnabled}
         seqVariations={playingSound?.type === "SEQ" ? seqVariationsBySound[playingSound.id] : null}
         onPlay={resumeCurrent}
@@ -5309,6 +5558,7 @@ function App() {
         onVolume={changeVolume}
         onStrmLoopChange={changeStrmLoop}
         onSeqLoopChange={changeSeqLoop}
+        onWaveLoopChange={changeWaveLoop}
         onAutoPlayChange={changeSoundListAutoPlay}
         onStrmTrackSelectionChange={changeStrmTrackSelection}
         onSeqVariationChange={(variation) => chooseSeqVariation(playingSound, variation)}
@@ -5338,14 +5588,14 @@ function App() {
         <ChooseRwavEncodingDialog
           target={replaceWaveTarget}
           onClose={() => setReplaceWaveTarget(null)}
-          onReplace={(encoding, looped, loopStart) => {
+          onReplace={(encoding, looped, loopStart, loopEnd) => {
             const target = replaceWaveTarget;
             setReplaceWaveTarget(null);
             if (target.kind === "sound") {
-              replaceWaveSound(target.soundId, target.path, encoding, looped, loopStart);
+              replaceWaveSound(target.soundId, target.path, encoding, looped, loopStart, loopEnd);
             }
             else if (target.operation === "add") {
-              addWaveArchiveSample(target.archiveId, target.path, encoding, looped, loopStart);
+              addWaveArchiveSample(target.archiveId, target.path, encoding, looped, loopStart, loopEnd);
             } else {
               replaceWaveArchiveSample(
                 target.archiveId,
@@ -5354,6 +5604,7 @@ function App() {
                 encoding,
                 looped,
                 loopStart,
+                loopEnd,
               );
             }
           }}
@@ -5372,6 +5623,21 @@ function App() {
       )}
       {showAbout && (
         <AboutDialog appMeta={appMeta} onClose={() => setShowAbout(false)} onError={setOpenError} />
+      )}
+      {batchExportOpen && (
+        <BatchExportDialog
+          sounds={D.sounds || []}
+          initialSoundIds={selectedItem?.kind === "sound" ? [selectedItem.id] : []}
+          onClose={() => setBatchExportOpen(false)}
+          onStart={batchExportSounds}
+        />
+      )}
+      {batchExportStatus && (
+        <BatchExportStatusDialog
+          {...batchExportStatus}
+          onClose={() => { if (!batchExportStatus.busy) setBatchExportStatus(null); }}
+          onAbort={abortBatchExport}
+        />
       )}
       {dumpStatus && (
         <DumpArchiveStatusDialog

@@ -1,14 +1,19 @@
-name: Release
+name: Build / Release
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Release tag (for example: v1.1.0)"
+      mode:
+        description: "Build test artifacts or publish a release"
         required: true
+        default: build
+        type: choice
+        options:
+          - build
+          - release
+      tag:
+        description: "Release tag (required only for release mode, for example: v1.1.1)"
+        required: false
         type: string
 
 permissions:
@@ -17,7 +22,7 @@ permissions:
 env:
   PYTHON_VERSION: "3.12"
   NODE_VERSION: "20"
-  BUILD_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
+  BUILD_LABEL: ${{ inputs.mode == 'release' && inputs.tag || github.sha }}
 
 jobs:
   build-windows:
@@ -41,7 +46,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Check release tag and package version
-        if: github.event_name == 'workflow_dispatch'
+        if: inputs.mode == 'release'
         shell: python
         run: |
           import os
@@ -98,7 +103,7 @@ jobs:
       - name: Upload Windows archive
         uses: actions/upload-artifact@v7
         with:
-          name: release-windows
+          name: ${{ inputs.mode == 'release' && 'release-windows' || 'build-windows' }}
           path: Pysar-*-Windows-x64.zip
           if-no-files-found: error
 
@@ -134,7 +139,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Check release tag and package version
-        if: github.event_name == 'workflow_dispatch'
+        if: inputs.mode == 'release'
         shell: python
         run: |
           import os
@@ -182,12 +187,12 @@ jobs:
       - name: Upload Linux bundle
         uses: actions/upload-artifact@v7
         with:
-          name: release-linux
+          name: ${{ inputs.mode == 'release' && 'release-linux' || 'build-linux' }}
           path: Pysar-*-Linux-x64.tar.gz
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'workflow_dispatch'
+    if: inputs.mode == 'release'
     name: Publish GitHub release
     needs:
       - build-windows
