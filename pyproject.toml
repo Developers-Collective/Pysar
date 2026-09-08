@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pysar"
-version = "1.1.1"
+dynamic = ["version"]
 description = "The first fully-fledged Nintendo Wii BRSAR editor"
 readme = "README.md"
 license = "MPL-2.0 AND MIT"
@@ -52,6 +52,9 @@ build = [
 
 [project.scripts]
 pysar = "pysar.app:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "pysar._version.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["pysar*"]

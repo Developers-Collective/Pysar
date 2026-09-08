@@ -10,7 +10,7 @@
 
 Pysar is the first fully fledged editor for Nintendo Wii BRSAR archives! It gives streams, wave sounds, sequences, banks, players, groups, and wave archives a proper desktop interface, with playback and editing tools in the same place.
 
-Version 1.1.1 is the current stable release. But please be aware that it may still contain annoying bugs. If you find a bug or have a question, please reach out to us on Discord:
+The current stable release is available on the [Releases page](https://github.com/Developers-Collective/Pysar/releases/latest). But please be aware that it may still contain annoying bugs. If you find a bug or have a question, please reach out to us on Discord:
 `@ogu_99` or `@nin0_`.
 
 This is an independent project and is not affiliated with or endorsed by Nintendo.
@@ -97,6 +97,12 @@ python pysar.py
 ```
 
 After installation, the `pysar` command starts the same application. Set `PYSAR_DEBUG=1` before launching if you need pywebview's developer/debug mode.
+
+## Updating the version
+
+Change only `__version__` in `pysar/_version.py`. The Python package metadata, desktop window title, and GUI version display all use that value.
+
+To publish, run the **Build / Release** GitHub Actions workflow manually in `release` mode and enter the same version prefixed with `v` as the release tag. The workflow checks that they match.
 
 ## Credits
 

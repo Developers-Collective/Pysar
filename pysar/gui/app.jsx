@@ -288,7 +288,7 @@ function AboutDialog({ appMeta, onClose, onError }) {
 
 function App() {
   window.PYSAR_DATA = window.PYSAR_DATA || { archive: null, activeDocumentId: null, documents: [], sounds: [], banks: [], groups: [], players: [], waveArchives: [], files: [] };
-  window.PYSAR_APP = window.PYSAR_APP || { name: "PYSAR - 1.1.1", version: "1.1.1", displayVersion: "1.1.1", phase: "Stable" };
+  window.PYSAR_APP = window.PYSAR_APP || { name: "PYSAR", version: "", displayVersion: "", phase: "" };
   const D = window.PYSAR_DATA;
   const [tw, setTwState] = useStateA({ ...APPEARANCE });
   const setTweak = useCallbackA((key, value) => setTwState((prev) => ({ ...prev, [key]: value })), []);
