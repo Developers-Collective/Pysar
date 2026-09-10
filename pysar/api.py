@@ -6516,6 +6516,25 @@ class PysarApi:
             return {"ok": False, "error": str(exc)}
 
     @staticmethod
+    def _brstm_source_info(path: str) -> dict:
+        source = Path(str(path)).expanduser()
+        if source.suffix.lower() == ".brstm":
+            from pysar.core.format.rstm import Brstm
+
+            stream = Brstm.open(source)
+            return {
+                "path": str(source), "name": source.name, "sourceFormat": "BRSTM",
+                "encoding": stream.codec.name, "sampleRate": stream.sample_rate,
+                "channels": stream.n_channels, "tracks": stream.data.n_tracks,
+                "samples": stream.n_samples, "durationMs": round(stream.duration * 1000),
+                "looped": stream.is_looped, "loopStart": stream.loop_start,
+                "loopEnd": stream.n_samples,
+            }
+        if source.suffix.lower() != ".wav":
+            raise ValueError("Choose a .brstm or uncompressed .wav file")
+        return {"sourceFormat": "WAV", **PysarApi._brstm_source_wav_info(str(source))}
+
+    @staticmethod
     def _brstm_source_wav_info(path: str) -> dict:
         import wave
 
@@ -6842,6 +6861,31 @@ class PysarApi:
         return self._choose_brstm_save_path(default_filename)
 
     @staticmethod
+    def _replacement_brstm_from_path(
+            path: str | Path,
+            codec: str = "ADPCM",
+            loop_enabled: bool = False,
+            loop_start: int = 0,
+            loop_end: int | None = None,
+    ):
+        """Return stream metadata and output bytes, preserving native input exactly."""
+        from pysar.core.format.rstm import Brstm
+
+        source = Path(str(path)).expanduser()
+        if source.suffix.lower() == ".brstm":
+            raw = source.read_bytes()
+            stream = Brstm.from_bytes(raw)
+            # The BRSAR must describe the complete file that will be copied.
+            stream.data.file_size = len(raw)
+            return stream, raw
+        if source.suffix.lower() != ".wav":
+            raise ValueError("Choose a .brstm or uncompressed .wav file")
+        stream = PysarApi._create_brstm_from_wav(
+            source, codec, loop_enabled, loop_start, loop_end,
+        )
+        return stream, stream.to_bytes()
+
+    @staticmethod
     def _create_brstm_from_wav(
             wav_path: str | Path,
             codec: str = "ADPCM",
@@ -6935,7 +6979,7 @@ class PysarApi:
         try:
             wav_file = Path(str(wav_path)).expanduser()
             if not wav_file.is_file():
-                return {"ok": False, "error": f"WAV file not found: {wav_path}"}
+                return {"ok": False, "error": f"Source file not found: {wav_path}"}
 
             archive, entry, sound_name, file_entry = self._strm_context(int(sound_id))
             external_path = str(file_entry.external_file_path or "").strip()
@@ -6951,14 +6995,13 @@ class PysarApi:
             if target_path is None:
                 return {"ok": False, "error": "Cancelled"}
 
-            replacement = self._create_brstm_from_wav(
+            replacement, replacement_bytes = self._replacement_brstm_from_path(
                 wav_file,
                 codec,
                 bool(loop_enabled),
                 int(loop_start),
                 loop_end,
             )
-            replacement_bytes = replacement.to_bytes()
             target_path.parent.mkdir(parents=True, exist_ok=True)
             target_path.write_bytes(replacement_bytes)
 
@@ -6986,7 +7029,7 @@ class PysarApi:
             result = self._window.create_file_dialog(
                 dialog_type=FileDialog.OPEN,
                 allow_multiple=False,
-                file_types=("WAV files (*.wav)", "All files (*.*)"),
+                file_types=("Stream audio (*.brstm;*.wav)", "All files (*.*)"),
             )
             if not result:
                 return {"ok": False, "error": "Cancelled"}
@@ -7721,12 +7764,12 @@ class PysarApi:
             result = self._window.create_file_dialog(
                 dialog_type=FileDialog.OPEN,
                 allow_multiple=False,
-                file_types=("WAV files (*.wav)", "All files (*.*)"),
+                file_types=("Stream audio (*.brstm;*.wav)", "All files (*.*)"),
             )
             if not result:
                 return {"ok": False, "error": "Cancelled"}
             wav_path = result[0] if isinstance(result, (list, tuple)) else result
-            return {"ok": True, **self._brstm_source_wav_info(str(wav_path))}
+            return {"ok": True, **self._brstm_source_info(str(wav_path))}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -7956,7 +7999,7 @@ class PysarApi:
             if target_path is None:
                 return {"ok": False, "error": "Cancelled"}
 
-            brstm = self._create_brstm_from_wav(
+            brstm, stream_bytes = self._replacement_brstm_from_path(
                 wav_path,
                 codec,
                 bool(loop_enabled),
@@ -7964,7 +8007,7 @@ class PysarApi:
                 loop_end,
             )
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            target_path.write_bytes(brstm.to_bytes())
+            target_path.write_bytes(stream_bytes)
 
             new_file_index = self._insert_strm_sound(
                 archive,

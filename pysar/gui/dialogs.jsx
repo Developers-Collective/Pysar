@@ -294,12 +294,13 @@ function BrstmCreationFields({
   busy,
 }) {
   const sampleCount = Number(wavInfo?.samples || 0);
+  const nativeStream = wavInfo?.sourceFormat === "BRSTM";
   return (
     <div className="brstm-create-fields">
       <div className="dialog-field">
-        <label>Source WAV</label>
+        <label>Source audio</label>
         <div className="dialog-path-row">
-          <input value={wavInfo?.path || ""} readOnly placeholder="Choose a .wav file" />
+          <input value={wavInfo?.path || ""} readOnly placeholder="Choose a .brstm or .wav file" />
           <button className="tb-btn" onClick={onChooseWav} disabled={busy}>Browse</button>
         </div>
         {wavInfo && (
@@ -309,6 +310,12 @@ function BrstmCreationFields({
         )}
       </div>
 
+      {nativeStream ? (
+        <div className="dialog-hint">
+          The BRSTM is copied unchanged, preserving its {wavInfo.encoding} encoding,
+          tracks, channels, and {wavInfo.looped ? `loop at sample ${wavInfo.loopStart.toLocaleString()}` : "non-looping playback"}.
+        </div>
+      ) : <>
       <div className="dialog-field">
         <label>BRSTM encoding</label>
         <select value={codec} onChange={(e) => onCodecChange(e.target.value)} disabled={busy}>
@@ -355,6 +362,7 @@ function BrstmCreationFields({
         </div>
       )}
 
+      </>}
       <div className="brstm-output-choice">
         <label className="dialog-checkbox">
           <input
@@ -601,7 +609,7 @@ function AddSoundDialog({ onClose, onDirtyChange, onDataRefresh, initialSoundTyp
       } else {
         if (!strmPath.trim()) { setError("BRSTM path is required"); setBusy(false); return; }
         if (strmSource === "create") {
-          if (!strmWavInfo?.path) { setError("Choose a source WAV file"); setBusy(false); return; }
+          if (!strmWavInfo?.path) { setError("Choose a source BRSTM or WAV file"); setBusy(false); return; }
           result = await window.pysar.call(
             "add_strm_sound_from_wav_path",
             name.trim(),
@@ -885,7 +893,7 @@ function AddSoundDialog({ onClose, onDirtyChange, onDataRefresh, initialSoundTyp
                   Existing BRSTM
                 </button>
                 <button className={strmSource === "create" ? "on" : ""} onClick={() => setStrmSource("create")} disabled={busy}>
-                  Create from WAV
+                  Import BRSTM / WAV
                 </button>
               </div>
             </div>
@@ -1131,7 +1139,7 @@ function ReplaceSoundDialog({ soundId, onClose, onDirtyChange, onDataRefresh, on
 
   async function replaceStrmFile() {
     if (!strmWavInfo?.path) {
-      setError("Choose a source WAV file");
+      setError("Choose a source BRSTM or WAV file");
       return;
     }
     setBusy(true);
@@ -1239,8 +1247,8 @@ function ReplaceSoundDialog({ soundId, onClose, onDirtyChange, onDataRefresh, on
           <div className="strm-replace-option">
             <div className="strm-replace-title">Replace the BRSTM file</div>
             <div className="dialog-hint">
-              Create a BRSTM from a WAV while keeping the BRSAR's external path unchanged.
-              The generated file's size, channels, and track flags are patched automatically.
+              Import a BRSTM or convert a WAV while keeping the BRSAR's external path unchanged.
+              The replacement file's size, channels, and track flags are patched automatically.
             </div>
             <BrstmCreationFields
               wavInfo={strmWavInfo}
@@ -1259,7 +1267,7 @@ function ReplaceSoundDialog({ soundId, onClose, onDirtyChange, onDataRefresh, on
               busy={busy}
             />
             <button className="tb-btn primary" onClick={replaceStrmFile} disabled={busy}>
-              {busy && strmAction === "file" ? "Creating…" : "Create BRSTM and patch sound…"}
+              {busy && strmAction === "file" ? "Saving…" : "Save BRSTM and patch sound…"}
             </button>
           </div>
 
