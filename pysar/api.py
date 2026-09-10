@@ -5156,7 +5156,7 @@ class PysarApi:
                 loop_start=int(loop_start) if bool(looped) else -1,
                 loop_end=int(loop_end) if bool(looped) and loop_end is not None else -1,
             )
-        raise ValueError("Choose a .rwav, .brwav, or uncompressed mono .wav file")
+        raise ValueError("Choose a .rwav, .brwav, or uncompressed mono/stereo .wav file")
 
     def _choose_brwav_replacement_source(self) -> tuple[Path, str] | None:
         source = self._choose_import_path(_SAMPLE_IMPORT_FILE_TYPES)
@@ -5164,7 +5164,7 @@ class PysarApi:
             return None
         suffix = source.suffix.lower()
         if suffix not in {".wav", ".rwav", ".brwav"}:
-            raise ValueError("Choose a .rwav, .brwav, or uncompressed mono .wav file")
+            raise ValueError("Choose a .rwav, .brwav, or uncompressed mono/stereo .wav file")
         return source, "WAV" if suffix == ".wav" else "BRWAV"
 
     @staticmethod

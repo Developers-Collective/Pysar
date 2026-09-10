@@ -106,6 +106,8 @@ class BrwavReader(ReaderBase):
 
         # Read ADPCM params for each channel
         for channel in wave_info.channels:
+            if wave_info.encoding != AudioCodec.ADPCM:
+                continue
             if wave_info.location_type == LocationType.OFFSET:
                 data.seek(wave_base + channel.adpcm_offset)
             else:

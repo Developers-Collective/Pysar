@@ -33,8 +33,8 @@ def _read_wav_as_pcm16_samples(wav: wave.Wave_read) -> tuple[list[int], int]:
     if wav.getcomptype() != "NONE":
         raise ValueError("Only uncompressed PCM WAV files are supported")
 
-    if n_channels != 1:
-        raise ValueError("BRWAV only supports mono audio. Use BRSTM for multi-channel.")
+    if n_channels not in (1, 2):
+        raise ValueError("BRWAV supports mono or stereo audio (1 or 2 channels).")
 
     frames = wav.readframes(n_samples)
     frame_size = sample_width * n_channels
@@ -53,7 +53,7 @@ def _read_wav_as_pcm16_samples(wav: wave.Wave_read) -> tuple[list[int], int]:
         return [((sample - 128) << 8) for sample in frames], sample_rate
 
     if sample_width == 2:
-        return list(struct.unpack(f"<{n_samples}h", frames)), sample_rate
+        return list(struct.unpack(f"<{n_samples * n_channels}h", frames)), sample_rate
 
     if sample_width == 3:
         samples = []
@@ -65,7 +65,7 @@ def _read_wav_as_pcm16_samples(wav: wave.Wave_read) -> tuple[list[int], int]:
         return samples, sample_rate
 
     if sample_width == 4:
-        samples_32 = struct.unpack(f"<{n_samples}i", frames)
+        samples_32 = struct.unpack(f"<{n_samples * n_channels}i", frames)
         return [max(-32768, min(32767, sample >> 16)) for sample in samples_32], sample_rate
 
     raise ValueError(f"Unsupported WAV sample width: {sample_width * 8}-bit")
@@ -133,10 +133,12 @@ class Brwav(EditorBase):
         """
         with wave.open(str(wav_path), "rb") as wav:
             samples, sample_rate = _read_wav_as_pcm16_samples(wav)
+            n_channels = wav.getnchannels()
 
         return cls.from_pcm(
             samples,
             sample_rate,
+            n_channels=n_channels,
             encoding=encoding,
             loop_start=loop_start,
             loop_end=loop_end,
@@ -148,6 +150,7 @@ class Brwav(EditorBase):
             pcm_samples: list[int],
             sample_rate: int,
             *,
+            n_channels: int = 1,
             encoding: AudioCodec = AudioCodec.ADPCM,
             loop_start: int = -1,
             loop_end: int = -1,
@@ -156,8 +159,9 @@ class Brwav(EditorBase):
         Create a BRWAV from raw PCM samples.
 
         Args:
-            pcm_samples: List of signed 16-bit PCM samples
+            pcm_samples: Frame-interleaved signed 16-bit PCM samples
             sample_rate: Sample rate in Hz
+            n_channels: Channel count (1 for mono, 2 for stereo)
             encoding: Target encoding format
             loop_start: Loop start sample (-1 for no loop)
             loop_end: Loop end sample / total length (-1 for full length)
@@ -165,7 +169,11 @@ class Brwav(EditorBase):
         Returns:
             A new BrwavEditor with the encoded audio
         """
-        n_samples = len(pcm_samples)
+        if n_channels not in (1, 2):
+            raise ValueError("BRWAV supports mono or stereo audio (1 or 2 channels).")
+        if len(pcm_samples) % n_channels:
+            raise ValueError("PCM samples must contain complete audio frames")
+        n_samples = len(pcm_samples) // n_channels
 
         is_looped = loop_start >= 0
         if is_looped:
@@ -183,7 +191,7 @@ class Brwav(EditorBase):
 
         # BRWAV has no separate playable-end field beyond loopEnd. Samples
         # after an authored loop end are therefore not part of the encoded wave.
-        pcm_samples = pcm_samples[:total_samples]
+        pcm_samples = pcm_samples[:total_samples * n_channels]
 
         sample_data, wave_info = cls._encode_samples(
             pcm_samples,
@@ -191,6 +199,7 @@ class Brwav(EditorBase):
             encoding,
             loop_start=loop_start if is_looped else -1,
             total_samples=total_samples,
+            n_channels=n_channels,
         )
 
         data = BrwavData(
@@ -316,24 +325,12 @@ class Brwav(EditorBase):
     #
 
     def convert_to(self, target_encoding: AudioCodec) -> Self:
-        """Convert the audio to a different encoding format.
-
-        The encoder currently emits mono BRWAVs. Multi-channel input is
-        therefore downmixed by frame before conversion; treating interleaved
-        PCM values as one mono stream would double the duration and move loop
-        points to the wrong frame.
-        """
+        """Convert encoding while preserving channels and loop frame positions."""
         if self.encoding == target_encoding:
             return self
 
-        decoded_channels = self.decode_channels()
-        arrays = [np.frombuffer(channel, dtype="<i2").astype(np.int32) for channel in decoded_channels]
-        n_samples = min((len(channel) for channel in arrays), default=0)
-        if len(arrays) == 1:
-            samples = arrays[0][:n_samples].astype(np.int16).tolist()
-        else:
-            mixed = sum(channel[:n_samples] for channel in arrays) // len(arrays)
-            samples = np.clip(mixed, -32768, 32767).astype(np.int16).tolist()
+        samples = np.frombuffer(self.decode(), dtype="<i2").tolist()
+        n_samples = len(samples) // self.n_channels
 
         # Preserve loop info
         is_looped = self.is_looped
@@ -346,11 +343,13 @@ class Brwav(EditorBase):
             target_encoding,
             loop_start=loop_start,
             total_samples=n_samples,
+            n_channels=self.n_channels,
         )
 
         # Update data
         self._data.wave_info = wave_info
         self._data.sample_data = sample_data
+        self._data.raw_bytes = None
         self._decoded_pcm = None
         self._decoded_channels = None
         self.mark_dirty(DirtyFlags.ALL)
@@ -467,7 +466,7 @@ class Brwav(EditorBase):
     def _decode_adpcm(self, data: bytes, n_samples: int, n_channels: int) -> bytes:
         """Decode DSP-ADPCM to PCM16."""
 
-        # Get ADPCM params for the first channel (BRWAV is mono)
+        # Legacy helper for a single channel with its own ADPCM parameters.
         if not self._data.wave_info.adpcm_params:
             raise ValueError("No ADPCM parameters found in wave info")
 
@@ -491,22 +490,47 @@ class Brwav(EditorBase):
             encoding: AudioCodec,
             loop_start: int = -1,
             total_samples: int | None = None,
+            n_channels: int = 1,
     ) -> tuple[bytes, WaveInfo]:
         """
         Encode PCM samples to the specified format.
 
         Args:
-            pcm_samples: PCM samples (already truncated to desired length)
+            pcm_samples: Frame-interleaved PCM (already truncated to desired length)
             sample_rate: Sample rate in Hz
             encoding: Target encoding
             loop_start: Loop start sample (-1 for no loop)
-            total_samples: Total sample count (defaults to len(pcm_samples))
+            total_samples: Frame count (defaults to len(pcm_samples) / n_channels)
+            n_channels: Channel count (1 or 2)
 
         Returns:
             Tuple of (encoded sample data, WaveInfo)
         """
+        if n_channels not in (1, 2):
+            raise ValueError("BRWAV supports mono or stereo audio (1 or 2 channels).")
         if total_samples is None:
-            total_samples = len(pcm_samples)
+            total_samples = len(pcm_samples) // n_channels
+
+        if n_channels == 2:
+            # RWAV stores planar channel data, with independent ADPCM
+            # coefficients and loop histories. Only pad between channels.
+            channel_data = bytearray()
+            wave_info = None
+            for channel_index in range(n_channels):
+                encoded, channel_info = cls._encode_samples(
+                    pcm_samples[channel_index::n_channels], sample_rate, encoding,
+                    loop_start=loop_start, total_samples=total_samples,
+                )
+                channel_data.extend(b"\x00" * (-len(channel_data) % 0x20))
+                channel_info.channels[0].data_offset = len(channel_data)
+                channel_data.extend(encoded)
+                if wave_info is None:
+                    wave_info = channel_info
+                else:
+                    wave_info.channels.extend(channel_info.channels)
+                    wave_info.adpcm_params.extend(channel_info.adpcm_params)
+            wave_info.n_channels = n_channels
+            return bytes(channel_data), wave_info
 
         is_looped = loop_start >= 0
 
