@@ -11,6 +11,7 @@ from pysar.seq.runtime import INVALID_ENVELOPE, ActiveNote, CallFrame, PlayerCon
 class NoteRuntimeInfo:
     natural_duration_seconds: float | None = None
     ignore_note_off: bool = False
+    playable: bool = True
 
 
 TrackSnapshot = tuple[int, int, float, int, int, int, int, int, int, int, int, int]
@@ -929,6 +930,13 @@ class SequencePlayer:
         actual_note = max(0, min(127, note + track.transpose))
         track.started_notes = True
         runtime = self._resolve_note_runtime(track, actual_note, velocity)
+        if not runtime.playable and not ((track.tie or track.monophonic) and track.active_notes):
+            # A failed bank lookup creates no channel to wait for. Preserve
+            # explicit note timing, but a zero-length note cannot wait forever.
+            track.porta_key = actual_note
+            if track.note_wait:
+                track.wait_ticks = duration
+            return
         natural_end_tick = None
         if runtime.natural_duration_seconds is not None:
             ticks_per_second = (self._ctx.timebase * self._ctx.tempo * self._ctx.tempo_ratio) / 60.0

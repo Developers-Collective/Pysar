@@ -4382,6 +4382,7 @@ class Brsar(EditorBase):
         file_lookup: dict[int, int] = {}
         cursor = 32
         for file_id in ordered_embedded_file_ids(self._data):
+            cursor = (cursor + 31) & ~31
             file_lookup[file_id] = cursor
             cursor += len(self._data.embedded_files[file_id].raw_data)
 

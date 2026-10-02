@@ -159,8 +159,8 @@ class BrsarWriter(WriterBase):
         file_ids = ordered_embedded_file_ids(model)
         for file_id in file_ids:
             ef = model.embedded_files[file_id]
+            pad_to_alignment(buf, 0x20)
             relative_lookup[file_id] = buf.tell()
-            # Legacy serializer writes embedded files contiguously (no inter-file padding).
             buf.write(ef.raw_data)
 
         # Finalize size

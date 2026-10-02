@@ -1014,7 +1014,7 @@ class SequenceRenderer:
                 return cached
             info = resolver.resolve_info(resolved_program, resolved_note, velocity)
             if info is None:
-                result = NoteRuntimeInfo()
+                result = NoteRuntimeInfo(playable=False)
                 runtime_cache[cache_key] = result
                 return result
             param = _apply_track_param_overrides(info.param, track)
