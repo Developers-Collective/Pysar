@@ -57,9 +57,11 @@ pysar = "pysar.app:main"
 version = {attr = "pysar._version.__version__"}
 
 [tool.setuptools.packages.find]
-include = ["pysar*"]
+include = ["pysar*", "gui_lib*"]
 exclude = ["__old*"]
 
 [tool.setuptools.package-data]
 "pysar.gui" = ["*.html", "*.css", "*.jsx", "icons/*.png", "icons/*.svg", "icons/*.gif", "icons/*.webp", "vendor/*.js"]
 "pysar.gui.logo" = ["*.png", "*.ico"]
+"pysar.ui" = ["dist/*.html", "dist/assets/*"]
+"gui_lib" = ["web/*.js"]
