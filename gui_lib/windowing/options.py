@@ -24,6 +24,11 @@ class Theme(Enum):
     DARK = "dark"
 
 
+class Backdrop(Enum):
+    NONE = "none"
+    CLEAR = "clear"
+
+
 @dataclass(frozen=True)
 class WindowOptions:
     title: str = ""
@@ -42,5 +47,8 @@ class WindowOptions:
     chrome: ChromeMode = ChromeMode.AUTO
     # Can be changed later with Window.set_theme()
     theme: Theme = Theme.SYSTEM
+    # Can be changed later with Window.set_backdrop(). Window.backdrops() says which the
+    # system has; the window stays opaque with any other
+    backdrop: Backdrop = Backdrop.NONE
     # Stay hidden until the page has loaded, instead of showing an empty frame
     show_when_loaded: bool = True

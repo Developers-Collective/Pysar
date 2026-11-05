@@ -16,7 +16,7 @@ from typing import Any
 from ...windowing.options import ChromeMode, Theme, WindowPlatform
 from ...windowing.regions import TitleBarRegions
 from .. import pywebview_backend
-from . import native
+from . import message_box, native
 from .caption import CaptionButtons
 from .frame import Frame, show_system_menu
 from .title_bar import TitleBarLayout, TitleBarWindow, lay_out
@@ -103,6 +103,42 @@ class Win32WindowBackend(pywebview_backend.PywebviewWindowBackend):
         # A fullscreen window has no title bar
         if self._title_bar is not None:
             self._title_bar.request_layout()
+
+    def message_box(self, box: Any) -> int:
+        from System import Action
+
+        form = self.native_window
+        title = self._owner.application.name
+        if form is None or self._closed or not form.InvokeRequired:
+            # On the GUI thread already, or without a window
+            return message_box.show(self._hwnd if form is not None else 0, title, box)
+
+        done = threading.Event()
+        answer = [box.dismissed]
+
+        def show() -> None:
+            try:
+                answer[0] = message_box.show(self._hwnd, title, box)
+            except Exception:
+                logger.exception("couldn't ask the user")
+            finally:
+                done.set()
+
+        try:
+            form.BeginInvoke(Action(show))
+        except Exception:
+            # The form is gone
+            return box.dismissed
+        self._wait_for_answer(done)
+        return answer[0]
+
+    def show_devtools(self) -> None:
+        def show() -> None:
+            core = self.native_window.webview.CoreWebView2
+            if core is not None:
+                core.OpenDevToolsWindow()
+
+        self._on_gui_thread(show)
 
     def _send_script(self, script: str) -> None:
         """Run a script in the page without waiting for it"""

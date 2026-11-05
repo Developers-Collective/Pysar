@@ -1,5 +1,6 @@
 import importlib
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING
@@ -8,6 +9,7 @@ from ..windowing.options import WindowOptions, WindowPlatform
 
 if TYPE_CHECKING:
     from ..windowing.backend import WindowBackend
+    from ..windowing.menus import MenuItem
     from ..windowing.window import Window
 
 _PACKAGES = {
@@ -35,6 +37,20 @@ def resolve_platform(requested: WindowPlatform) -> WindowPlatform:
 
 def _package(platform: WindowPlatform) -> ModuleType:
     return importlib.import_module(f"{__name__}.{_PACKAGES[platform]}")
+
+
+def prepare_process(platform: WindowPlatform, name: str, icon: Path | None) -> None:
+    prepare = getattr(_package(platform), "prepare_process", None)
+    if prepare is not None:
+        prepare(name, icon)
+
+
+def install_menu(platform: WindowPlatform, items: Sequence["MenuItem"], *, name: str, version: str | None) -> bool:
+    install = getattr(_package(platform), "install_menu", None)
+    if install is None:
+        return False
+    install(items, name=name, version=version)
+    return True
 
 
 def create_backend(platform: WindowPlatform, owner: "Window", options: WindowOptions) -> "WindowBackend":

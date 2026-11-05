@@ -1,20 +1,29 @@
 import threading
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .backend import ContentBackend
+    from .window import Window
 
 Method = Callable[..., Any]
+
+_caller: ContextVar["Window | None"] = ContextVar("gui_lib_caller", default=None)
 
 
 class MissingMethod(LookupError):
     """Raised when a page calls a method not exposed to it"""
 
 
+def calling_window() -> "Window | None":
+    return _caller.get()
+
+
 class Content:
-    def __init__(self, backend: "ContentBackend") -> None:
+    def __init__(self, backend: "ContentBackend", window: "Window | None" = None) -> None:
         self._backend = backend
+        self._window = window
         self._methods: dict[str, Method] = {}
         self._lock = threading.Lock()
 
@@ -47,4 +56,8 @@ class Content:
             function = self._methods.get(method)
         if function is None:
             raise MissingMethod(f"No method {method!r} is exposed to the page.")
-        return function(**(params or {}))
+        token = _caller.set(self._window)
+        try:
+            return function(**(params or {}))
+        finally:
+            _caller.reset(token)

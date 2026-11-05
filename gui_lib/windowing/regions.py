@@ -33,6 +33,19 @@ class TitleBarRegions:
     # The box of the element that paints that background
     background_box: Rect | None = None
 
+    # The [data-window-controls] row the system's own window controls sit in
+    # (i.e. MacOS traffic lights)
+    window_controls: Rect | None = None
+
+    def is_drag(self, x: float, y: float) -> bool:
+        if not _inside(self.bar, x, y):
+            return False
+
+        if any(_inside(control, x, y) for control in self.controls):
+            return False
+
+        return not any(_inside(button, x, y) for button in self.caption.values())
+
     @classmethod
     def from_page(cls, data: Any) -> "TitleBarRegions | None":
         """Check and convert what the page sent or raise a ValueError for anything malformed"""
@@ -76,6 +89,7 @@ class TitleBarRegions:
             scale=float(scale),
             background=(image, color),
             background_box=_rect(box) if box is not None else None,
+            window_controls=_rect(row) if (row := data.get("windowControls")) is not None else None,
         )
 
 
@@ -88,3 +102,8 @@ def _rect(value: Any) -> Rect:
     # Clamp that so they make an empty region instead of an inverted one
     x, y, width, height = (float(v) for v in value)
     return x, y, max(width, 0.0), max(height, 0.0)
+
+
+def _inside(rect: Rect, x: float, y: float) -> bool:
+    left, top, width, height = rect
+    return left <= x < left + width and top <= y < top + height

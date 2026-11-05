@@ -4,14 +4,16 @@ import functools
 import json
 import logging
 import threading
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..windowing.content import MissingMethod
-from ..windowing.options import ChromeMode, Theme, WindowOptions, WindowPlatform
+from ..windowing.options import Backdrop, ChromeMode, Theme, WindowOptions, WindowPlatform
 
 if TYPE_CHECKING:
+    from ..windowing.dialogs import FileType, MessageBox
     from ..windowing.regions import TitleBarRegions
     from ..windowing.window import Window
 
@@ -61,12 +63,16 @@ class PywebviewWindowBackend:
         self._owner = owner
         self._options = options
         self._window: Any = None
+        # The title as it was set last
+        self._title = options.title
         self._show_lock = threading.Lock()
         self._shown = False
         self._show_timer: threading.Timer | None = None
         self._closed = False
         # Scripts wait for the page. Events are in their true order.
         self._events = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gui-events")
+        # pywebview keeps one answer per window, so two dialogs at once would mix theirs up
+        self._dialog_lock = threading.Lock()
 
     @property
     def native_window(self) -> Any:
@@ -83,7 +89,7 @@ class PywebviewWindowBackend:
 
         options = self._options
         self._window = window = webview.create_window(
-            options.title,
+            self._title,
             url=options.url,
             html=options.html,
             js_api=_PageApi(self._owner),
@@ -103,9 +109,7 @@ class PywebviewWindowBackend:
         events.loaded += self._loaded
         events.closing += self._closing
         events.closed += self._closed_event
-        events.maximized += lambda: self._owner._handle_state(maximized=True, minimized=False)
-        events.minimized += lambda: self._owner._handle_state(minimized=True)
-        events.restored += lambda: self._owner._handle_state(maximized=False, minimized=False)
+        self._track_window_state(events)
         if options.show_when_loaded:
             self._show_timer = threading.Timer(SHOW_TIMEOUT, self._show_once)
             self._show_timer.daemon = True
@@ -121,7 +125,15 @@ class PywebviewWindowBackend:
         self._pywebview.destroy()
 
     def set_title(self, title: str) -> None:
-        self._pywebview.set_title(title)
+        self._title = title
+        window = self._window
+        gui = getattr(window, "gui", None)
+        if gui is not None:
+            gui.set_title(title, window.uid)
+
+    def frame(self) -> tuple[int, int, int, int]:
+        window = self._pywebview
+        return window.x, window.y, window.width, window.height
 
     def minimize(self) -> None:
         self._pywebview.minimize()
@@ -138,11 +150,68 @@ class PywebviewWindowBackend:
     def set_theme(self, theme: Theme) -> None:
         self._apply_theme()
 
+    def set_backdrop(self, backdrop: Backdrop) -> None:
+        pass
+
+    def backdrops(self) -> tuple[Backdrop, ...]:
+        return (Backdrop.NONE,)
+
     def set_title_bar_regions(self, regions: "TitleBarRegions | None") -> None:
         pass
 
     def page_ready(self) -> None:
         pass
+
+    def chrome_details(self) -> dict[str, Any]:
+        return {}
+
+    def file_dialog(self, file_types: Sequence["FileType"], *, save: bool = False, multiple: bool = False,
+                    name: str = "", directory: Path | None = None, folder: bool = False) -> list[Path] | None:
+        import webview
+
+        if threading.current_thread() is threading.main_thread():
+            raise RuntimeError("A file dialog waits for the user, so it can't be opened from the GUI thread.")
+        kind = webview.FileDialog.FOLDER if folder else webview.FileDialog.SAVE if save else webview.FileDialog.OPEN
+        with self._dialog_lock:
+            chosen = self._pywebview.create_file_dialog(
+                kind,
+                directory=str(directory) if directory is not None else "",
+                allow_multiple=multiple,
+                save_filename=name,
+                # A folder dialog shows folders only
+                file_types=() if folder else tuple(self._file_filter(file_type) for file_type in file_types),
+            )
+        if not chosen:
+            return None
+        # A save dialog answers with the path itself on macOS, and a tuple of one elsewhere
+        return [Path(path) for path in ((chosen,) if isinstance(chosen, str) else chosen)]
+
+    def message_box(self, box: "MessageBox") -> int:
+        raise NotImplementedError(f"There's no message box on {self.platform.value}.")
+
+    def set_edited(self, edited: bool) -> None:
+        # Only macOS shows it in the window's frame
+        pass
+
+    def show_devtools(self) -> None:
+        pass
+
+    def _wait_for_answer(self, done: threading.Event) -> None:
+        while not done.wait(0.25):
+            if self._closed:
+                return
+
+    def _file_filter(self, file_type: "FileType") -> str:
+        patterns = ";".join(pattern for extension in file_type.extensions for pattern in self._patterns(extension))
+        return f"{file_type.name} ({patterns or '*.*'})"
+
+    def _patterns(self, extension: str) -> list[str]:
+        return [f"*.{extension}"]
+
+    def _track_window_state(self, events: Any) -> None:
+        events.maximized += lambda: self._owner._handle_state(maximized=True, minimized=False)
+        events.minimized += lambda: self._owner._handle_state(minimized=True)
+        events.restored += lambda: self._owner._handle_state(maximized=False, minimized=False)
 
     def load_url(self, url: str) -> None:
         self._pywebview.load_url(url)
@@ -194,12 +263,29 @@ class PywebviewWindowBackend:
             self._install_chrome()
 
     def _loaded(self) -> None:
+        if self._title != self._options.title:
+            self.set_title(self._title)
         info = json.dumps(self._owner._chrome_info())
         try:
             self._window.run_js(f"window.__pysarChromeInfo = {info};\n{_runtime()}")
         except Exception:  # yeah yeah don't kill me
             logger.exception("couldn't start the page's title bar")
+        self._watch_drops()
         self._page_loaded()
+
+    def _watch_drops(self) -> None:
+        from webview.dom import DOMEventHandler
+
+        try:
+            self._window.dom.document.on("drop", DOMEventHandler(self._dropped, prevent_default=True))
+        except Exception:
+            logger.exception("couldn't watch for dropped files")
+
+    def _dropped(self, event: dict[str, Any]) -> None:
+        files = (event.get("dataTransfer") or {}).get("files") or []
+        paths = [Path(file["pywebviewFullPath"]) for file in files if isinstance(file, dict) and file.get("pywebviewFullPath")]
+        if paths:
+            self._owner.files_dropped.emit(self._owner, paths)
 
     def _show_once(self) -> None:
         with self._show_lock:
