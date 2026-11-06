@@ -99,10 +99,21 @@ class GtkWindowBackend(pywebview_backend.PywebviewWindowBackend):
         self._webview = BrowserView.instances[self._window.uid].webview
         self._caption_layout = _caption_layout()
         self._connect(self._gtk_window, "window-state-event", self._state_changed)
+        if self._options.dialog_for is not None:
+            self._make_dialog()
         self._apply_theme()
         self._prepare_backdrop()
         if self._owner.chrome is ChromeMode.CUSTOM:
             self._install_chrome()
+
+    def _make_dialog(self) -> None:
+        """Tell the window manager the window is a dialog of its main window.
+        GNOME and KDE then keep it above that window and center it there.
+        """
+        window = self._gtk_window
+        window.set_transient_for(self._options.dialog_for.native_window)
+        window.set_type_hint(Gdk.WindowTypeHint.DIALOG)
+        window.set_skip_taskbar_hint(True)
 
     def _install_chrome(self) -> None:
         try:

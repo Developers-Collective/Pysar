@@ -1,5 +1,9 @@
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .window import Window
 
 # Painted until the page draws, so a window never flashes white
 DEFAULT_BACKGROUND_COLOR = 0x121214
@@ -52,3 +56,4 @@ class WindowOptions:
     backdrop: Backdrop = Backdrop.NONE
     # Stay hidden until the page has loaded, instead of showing an empty frame
     show_when_loaded: bool = True
+    dialog_for: "Window | None" = None

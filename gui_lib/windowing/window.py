@@ -170,6 +170,12 @@ class Window:
             self.quitting = False
 
     def _chrome_info(self) -> dict[str, Any]:
+        details = self._backend.chrome_details()
+        if self.options.dialog_for is not None:
+            # A dialog's page draws only the close button, on the side the desktop puts it
+            layout = details.get("captionButtons", {"left": [], "right": ["close"]})
+            details = {**details, "captionButtons": {side: [name for name in names if name == "close"]
+                                                     for side, names in layout.items()}}
         return {
             "platform": self.platform.value,
             "chrome": self.chrome.value,
@@ -177,7 +183,7 @@ class Window:
             "backdrop": (self.backdrop if self.backdrop in self.backdrops() else Backdrop.NONE).value,
             "backdrops": [backdrop.value for backdrop in self.backdrops()],
             "state": asdict(self.state),
-            **self._backend.chrome_details(),
+            **details,
         }
 
     def _set_title_bar_regions(self, regions: Any = None) -> None:

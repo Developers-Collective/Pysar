@@ -92,6 +92,8 @@ class MacOsWindowBackend(pywebview_backend.PywebviewWindowBackend):
             _windows[window.windowNumber()] = self
 
         self._place()
+        if self._options.dialog_for is not None:
+            self._make_dialog()
         self._observe_window()
         self._observe_appearance()
         self._apply_theme()
@@ -99,6 +101,13 @@ class MacOsWindowBackend(pywebview_backend.PywebviewWindowBackend):
         window.setDocumentEdited_(self._owner.edited)
         if self._owner.chrome is ChromeMode.CUSTOM:
             self._install_chrome()
+
+    def _make_dialog(self) -> None:
+        window = self._ns_window
+        window.setStyleMask_(window.styleMask() & ~AppKit.NSWindowStyleMaskMiniaturizable)
+        # Auxiliary instead of primary also lets it show over its window while that one is full screen
+        behavior = window.collectionBehavior() & ~AppKit.NSWindowCollectionBehaviorFullScreenPrimary
+        window.setCollectionBehavior_(behavior | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary)
 
     def _install_chrome(self) -> None:
         try:

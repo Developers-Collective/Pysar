@@ -223,6 +223,8 @@ class Win32WindowBackend(pywebview_backend.PywebviewWindowBackend):
 
         form = self.native_window
         self._hwnd = int(form.Handle.ToInt64())
+        if self._options.dialog_for is not None:
+            self._make_dialog()
         if self._owner.chrome is ChromeMode.CUSTOM:
             self._install_chrome()
         # After the title bar, so the caption buttons get the theme too
@@ -234,6 +236,15 @@ class Win32WindowBackend(pywebview_backend.PywebviewWindowBackend):
             form.webview.CoreWebView2InitializationCompleted += self._webview_initialized
             # The page calls this once its frames are on screen (see _reveal())
             self._owner.content.expose("window.presented", self._page_presented)
+
+    def _make_dialog(self) -> None:
+        hwnd = self._hwnd
+        owner = int(self._options.dialog_for.native_window.Handle.ToInt64())
+        native.SetWindowLongPtrW(hwnd, native.GWLP_HWNDPARENT, owner)
+        style = native.GetWindowLongPtrW(hwnd, native.GWL_STYLE)
+        native.SetWindowLongPtrW(hwnd, native.GWL_STYLE, style & ~(native.WS_MINIMIZEBOX | native.WS_MAXIMIZEBOX))
+        extended = native.GetWindowLongPtrW(hwnd, native.GWL_EXSTYLE)
+        native.SetWindowLongPtrW(hwnd, native.GWL_EXSTYLE, extended & ~native.WS_EX_APPWINDOW)
 
     def _webview_initialized(self, sender: Any, args: Any) -> None:
         """Let WebView2 draw while the window is still hidden"""
