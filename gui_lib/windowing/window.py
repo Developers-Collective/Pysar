@@ -210,3 +210,5 @@ class Window:
         expose("window.menu", lambda: page_items(self.application.page_menu()))
         expose("window.menuAction", lambda id: self.application.run_menu_item(id))
         expose("window.textFocus", self._set_text_focus)
+        # Asked once per drag of files, see platforms/file_drags.py
+        expose("window.draggedFiles", self._backend.dragged_names)

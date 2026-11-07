@@ -12,6 +12,7 @@ from PyObjCTools import AppHelper
 
 from ...windowing.options import Backdrop, ChromeMode, Theme, WindowPlatform
 from .. import pywebview_backend
+from . import drags
 from .app_config import dock_icon
 from .title_bar import EDGE_MARGIN, TrafficLights
 
@@ -90,6 +91,7 @@ class MacOsWindowBackend(pywebview_backend.PywebviewWindowBackend):
         self._background = window.backgroundColor()
         with _windows_lock:
             _windows[window.windowNumber()] = self
+        drags.watch(BrowserView.WebKitHost, _drag_entered)
 
         self._place()
         if self._options.dialog_for is not None:
@@ -577,6 +579,12 @@ def backend_of(ns_window: Any) -> MacOsWindowBackend | None:
         return None
     with _windows_lock:
         return _windows.get(ns_window.windowNumber())
+
+
+def _drag_entered(view: Any, drag: int, paths: list[Path]) -> None:
+    backend = backend_of(view.window())
+    if backend is not None:
+        backend._dragged.heard(drag, paths)
 
 
 def _install_monitor() -> None:

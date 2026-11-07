@@ -21,6 +21,7 @@ from gi.repository import Gdk, GLib, Gtk
 
 from ...windowing.options import Backdrop, ChromeMode, Theme, WindowPlatform
 from .. import pywebview_backend
+from ..file_drags import uri_paths
 
 if TYPE_CHECKING:
     from ...windowing.dialogs import MessageBox
@@ -99,6 +100,9 @@ class GtkWindowBackend(pywebview_backend.PywebviewWindowBackend):
         self._webview = BrowserView.instances[self._window.uid].webview
         self._caption_layout = _caption_layout()
         self._connect(self._gtk_window, "window-state-event", self._state_changed)
+        # pywebview's handler runs first and adds the paths to its list
+        self._connect(self._webview, "drag-data-received", self._drag_data)
+        self._connect(self._webview, "drag-leave", lambda webview, context, time: self._dragged.left())
         if self._options.dialog_for is not None:
             self._make_dialog()
         self._apply_theme()
@@ -237,6 +241,12 @@ class GtkWindowBackend(pywebview_backend.PywebviewWindowBackend):
     @staticmethod
     def _answer(box: "MessageBox", response: int) -> int:
         return response if 0 <= response < len(box.buttons) else box.dismissed
+
+    def _drag_data(self, webview: Any, context: Any, x: int, y: int, data: Any, info: int, time: int) -> None:
+        try:
+            self._dragged.heard(context, uri_paths(data.get_uris() or (data.get_text() or "").splitlines()))
+        except Exception:
+            logger.exception("couldn't read the dragged files")
 
     def show_devtools(self) -> None:
         def show() -> bool:

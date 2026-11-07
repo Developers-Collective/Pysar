@@ -73,10 +73,7 @@ def _missing_message(error: str) -> str:
     manager = next((name for name in PACKAGES if shutil.which(name)), None)
     install = PACKAGES[manager] if manager else "Install GTK 3, WebKitGTK 4.1 and PyGObject with your package manager."
     return (
-        "The app needs GTK 3 and WebKitGTK from your system, and they couldn't be loaded:\n"
-        f"    {error}\n\n"
-        "To install them:\n"
-        f"    {install}"
+        f"Couldn't load GTK 3 or WebKitGTK:\n    {error}\n\nTo install them:\n    {install}"
     )
 
 

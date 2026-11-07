@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..windowing.content import MissingMethod
 from ..windowing.options import Backdrop, ChromeMode, Theme, WindowOptions, WindowPlatform
+from .file_drags import DraggedFiles
 
 if TYPE_CHECKING:
     from ..windowing.dialogs import FileType, MessageBox
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 SHOW_TIMEOUT = 5.0
 # The title bar inside the shell
 RUNTIME = Path(__file__).resolve().parents[1] / "web" / "chrome.js"
+DROP_TARGET = "guiDropTarget"
 
 
 @functools.cache
@@ -73,6 +75,7 @@ class PywebviewWindowBackend:
         self._events = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gui-events")
         # pywebview keeps one answer per window, so two dialogs at once would mix theirs up
         self._dialog_lock = threading.Lock()
+        self._dragged = DraggedFiles()
 
     @property
     def native_window(self) -> Any:
@@ -196,6 +199,9 @@ class PywebviewWindowBackend:
     def show_devtools(self) -> None:
         pass
 
+    def dragged_names(self) -> list[str] | None:
+        return self._dragged.names()
+
     def _wait_for_answer(self, done: threading.Event) -> None:
         while not done.wait(0.25):
             if self._closed:
@@ -284,7 +290,10 @@ class PywebviewWindowBackend:
     def _dropped(self, event: dict[str, Any]) -> None:
         files = (event.get("dataTransfer") or {}).get("files") or []
         paths = [Path(file["pywebviewFullPath"]) for file in files if isinstance(file, dict) and file.get("pywebviewFullPath")]
-        if paths:
+        target = event.get(DROP_TARGET)
+        if isinstance(target, str):
+            self._owner.content.emit("window.filesDropped", {"target": target, "paths": [str(path) for path in paths]})
+        elif paths:
             self._owner.files_dropped.emit(self._owner, paths)
 
     def _show_once(self) -> None:
