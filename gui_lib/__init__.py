@@ -1,6 +1,7 @@
 from .windowing.application import Application
 from .windowing.content import Content, calling_window
 from .windowing.dialogs import ALL_FILES, FileType
+from .windowing.drag_out import DragOut
 from .windowing.events import Event
 from .windowing.menus import SEPARATOR, MenuItem
 from .windowing.options import Backdrop, ChromeMode, Theme, WindowOptions, WindowPlatform
@@ -12,6 +13,7 @@ __all__ = [
     "Backdrop",
     "ChromeMode",
     "Content",
+    "DragOut",
     "Event",
     "FileType",
     "MenuItem",

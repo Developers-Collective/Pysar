@@ -15,6 +15,7 @@ from .file_drags import DraggedFiles
 
 if TYPE_CHECKING:
     from ..windowing.dialogs import FileType, MessageBox
+    from ..windowing.drag_out import DragOut
     from ..windowing.regions import TitleBarRegions
     from ..windowing.window import Window
 
@@ -201,6 +202,9 @@ class PywebviewWindowBackend:
 
     def dragged_names(self) -> list[str] | None:
         return self._dragged.names()
+
+    def begin_drag_out(self, drag: "DragOut") -> bool:
+        return False
 
     def _wait_for_answer(self, done: threading.Event) -> None:
         while not done.wait(0.25):

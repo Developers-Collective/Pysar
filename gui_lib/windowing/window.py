@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from ..platforms import create_backend
 from .content import Content
 from .dialogs import FileType, MessageBox
+from .drag_out import DragOut
 from .events import Event
 from .menus import page_items
 from .options import Backdrop, ChromeMode, Theme, WindowOptions, WindowPlatform
@@ -128,6 +129,14 @@ class Window:
                     destructive: int | None = None) -> int:
         box = MessageBox(message, detail, tuple(buttons), default, cancel, warning, destructive)
         return self._backend.message_box(box)
+
+    def drag_out(self, drag: DragOut) -> bool:
+        """Hand the page's drag to the system for a file manager to take, from any thread.
+
+        Only while the mouse button that started it is down. Returns whether the system drag
+        began. The page hears of it from then on (see platforms/drag_out.py).
+        """
+        return self._backend.begin_drag_out(drag)
 
     def set_edited(self, edited: bool) -> None:
         edited = bool(edited)

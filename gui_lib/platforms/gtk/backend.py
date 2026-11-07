@@ -21,10 +21,12 @@ from gi.repository import Gdk, GLib, Gtk
 
 from ...windowing.options import Backdrop, ChromeMode, Theme, WindowPlatform
 from .. import pywebview_backend
+from ..drag_out import PendingDrops, call_on
 from ..file_drags import uri_paths
 
 if TYPE_CHECKING:
     from ...windowing.dialogs import MessageBox
+    from ...windowing.drag_out import DragOut
     from ...windowing.regions import TitleBarRegions
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,9 @@ class GtkWindowBackend(pywebview_backend.PywebviewWindowBackend):
         self._composited = False
         self._ready_timer: threading.Timer | None = None
         self._mapped = False
+        # The last press of the first button on the page, for starting a drag out
+        self._press_event: Any = None
+        self._drops = PendingDrops()
 
     def _frameless(self) -> bool:
         # This is NOT frameless. We only remove the title bar (see _install_chrome).
@@ -102,7 +107,10 @@ class GtkWindowBackend(pywebview_backend.PywebviewWindowBackend):
         self._connect(self._gtk_window, "window-state-event", self._state_changed)
         # pywebview's handler runs first and adds the paths to its list
         self._connect(self._webview, "drag-data-received", self._drag_data)
-        self._connect(self._webview, "drag-leave", lambda webview, context, time: self._dragged.left())
+        self._connect(self._webview, "drag-leave", self._drag_left)
+        self._connect(self._webview, "drag-motion", self._drag_motion)
+        self._connect(self._webview, "drag-drop", self._drag_dropped)
+        self._connect(self._webview, "button-press-event", self._remember_press)
         if self._options.dialog_for is not None:
             self._make_dialog()
         self._apply_theme()
@@ -247,6 +255,42 @@ class GtkWindowBackend(pywebview_backend.PywebviewWindowBackend):
             self._dragged.heard(context, uri_paths(data.get_uris() or (data.get_text() or "").splitlines()))
         except Exception:
             logger.exception("couldn't read the dragged files")
+
+    #
+    # Dragging out (drag_out.py)
+    #
+
+    def begin_drag_out(self, drag: "DragOut") -> bool:
+        if self._closed or self._gtk_window is None:
+            return False
+        from . import drag_out
+
+        return bool(call_on(drag_out.on_gui, lambda: drag_out.begin(self, drag), False))
+
+    def _come_forward(self) -> None:
+        if self._gtk_window is not None and not self._closed:
+            self._gtk_window.present_with_time(Gtk.get_current_event_time())
+
+    def _remember_press(self, webview: Any, event: Any) -> bool:
+        if event.type == Gdk.EventType.BUTTON_PRESS and event.button == 1:
+            self._press_event = event.copy()
+        return False
+
+    def _drag_motion(self, webview: Any, context: Any, x: int, y: int, time: int) -> bool:
+        from . import drag_out
+
+        return drag_out.motion(self, context, x, y, time)
+
+    def _drag_dropped(self, webview: Any, context: Any, x: int, y: int, time: int) -> bool:
+        from . import drag_out
+
+        return drag_out.drop(self, context, x, y, time)
+
+    def _drag_left(self, webview: Any, context: Any, time: int) -> None:
+        from . import drag_out
+
+        self._dragged.left()
+        drag_out.leave(context)
 
     def show_devtools(self) -> None:
         def show() -> bool:
@@ -439,6 +483,7 @@ class GtkWindowBackend(pywebview_backend.PywebviewWindowBackend):
             if GObject.signal_handler_is_connected(widget, handler):
                 widget.disconnect(handler)
         self._handlers.clear()
+        self._drops.cancel_all()
 
         super()._closed_event()
 

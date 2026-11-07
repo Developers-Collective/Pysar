@@ -12,12 +12,14 @@ from PyObjCTools import AppHelper
 
 from ...windowing.options import Backdrop, ChromeMode, Theme, WindowPlatform
 from .. import pywebview_backend
-from . import drags
+from ..drag_out import PendingDrops, call_on
+from . import drag_out, drags
 from .app_config import dock_icon
 from .title_bar import EDGE_MARGIN, TrafficLights
 
 if TYPE_CHECKING:
     from ...windowing.dialogs import MessageBox
+    from ...windowing.drag_out import DragOut
     from ...windowing.regions import TitleBarRegions
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,7 @@ class MacOsWindowBackend(pywebview_backend.PywebviewWindowBackend):
         # AppKit's fullscreen title bar while it's hidden
         self._fullscreen_bar: tuple[Any, bool, bool] | None = None
         self._closing_animated = False
+        self._drops = PendingDrops()
 
     def _frameless(self) -> bool:
         return self._owner.chrome is ChromeMode.CUSTOM
@@ -91,7 +94,7 @@ class MacOsWindowBackend(pywebview_backend.PywebviewWindowBackend):
         self._background = window.backgroundColor()
         with _windows_lock:
             _windows[window.windowNumber()] = self
-        drags.watch(BrowserView.WebKitHost, _drag_entered)
+        drags.watch(BrowserView.WebKitHost, _drag_entered, drag_out.owns)
 
         self._place()
         if self._options.dialog_for is not None:
@@ -281,6 +284,26 @@ class MacOsWindowBackend(pywebview_backend.PywebviewWindowBackend):
     def _answer(box: "MessageBox", order: list[int], response: int) -> int:
         position = response - AppKit.NSAlertFirstButtonReturn
         return order[position] if 0 <= position < len(order) else box.dismissed
+
+    #
+    # Dragging out (drag_out.py)
+    #
+
+    def begin_drag_out(self, drag: "DragOut") -> bool:
+        if self._web_view is None or self._closed:
+            return False
+        session = drag_out.MacDragOut(self._owner, drag, self._web_view, self._drops, self._come_forward)
+        return bool(call_on(AppHelper.callAfter, lambda: drag_out.begin(session, self._ns_window), False))
+
+    def _come_forward(self) -> None:
+        """Take over from the Finder the drop came from"""
+        window = self._ns_window
+        if window is None or self._closed:
+            return
+        if window.isMiniaturized():
+            window.deminiaturize_(None)
+        AppKit.NSApp.activateIgnoringOtherApps_(True)
+        window.makeKeyAndOrderFront_(None)
 
     def set_edited(self, edited: bool) -> None:
         AppHelper.callAfter(self._apply_edited)
@@ -552,6 +575,7 @@ class MacOsWindowBackend(pywebview_backend.PywebviewWindowBackend):
                 if backend is self:
                     del _windows[number]
 
+        self._drops.cancel_all()
         super()._closed_event()
 
 

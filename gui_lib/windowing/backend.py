@@ -6,6 +6,7 @@ from .options import Backdrop, Theme, WindowPlatform
 
 if TYPE_CHECKING:
     from .dialogs import FileType, MessageBox
+    from .drag_out import DragOut
     from .regions import TitleBarRegions
 
 
@@ -71,3 +72,6 @@ class WindowBackend(ContentBackend, Protocol):
 
     # The names of the files dragged over the window
     def dragged_names(self) -> list[str] | None: ...
+
+    # Starts a system drag of what the page drags, from any thread. Whether it began
+    def begin_drag_out(self, drag: "DragOut") -> bool: ...

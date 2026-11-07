@@ -16,7 +16,7 @@ from typing import Any
 from ...windowing.options import ChromeMode, Theme, WindowPlatform
 from ...windowing.regions import TitleBarRegions
 from .. import pywebview_backend
-from . import message_box, native
+from . import drag_out, message_box, native
 from .caption import CaptionButtons
 from .frame import Frame, show_system_menu
 from .title_bar import TitleBarLayout, TitleBarWindow, lay_out
@@ -132,6 +132,12 @@ class Win32WindowBackend(pywebview_backend.PywebviewWindowBackend):
         self._wait_for_answer(done)
         return answer[0]
 
+    def begin_drag_out(self, drag: Any) -> bool:
+        """Drag files rendered with the app's defaults, see drag_out.py"""
+        if self._closed or self.native_window is None:
+            return False
+        return drag_out.WinDragOut(self, drag).start()
+
     def show_devtools(self) -> None:
         def show() -> None:
             core = self.native_window.webview.CoreWebView2
@@ -223,6 +229,7 @@ class Win32WindowBackend(pywebview_backend.PywebviewWindowBackend):
 
         form = self.native_window
         self._hwnd = int(form.Handle.ToInt64())
+        drag_out.watch(self)
         if self._options.dialog_for is not None:
             self._make_dialog()
         if self._owner.chrome is ChromeMode.CUSTOM:
